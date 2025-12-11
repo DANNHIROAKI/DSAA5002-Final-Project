@@ -60,31 +60,31 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--skip-baselines",
-        action="bool",
+        action="store_true",
         default=False,
         help="Skip running baseline clustering experiments.",
     )
     parser.add_argument(
         "--skip-rajc",
-        action="bool",
+        action="store_true",
         default=False,
         help="Skip running the main RAJC experiment.",
     )
     parser.add_argument(
         "--skip-downstream",
-        action="bool",
+        action="store_true",
         default=False,
         help="Skip running downstream prediction experiments.",
     )
     parser.add_argument(
         "--skip-ablation",
-        action="bool",
+        action="store_true",
         default=False,
         help="Skip RAJC ablation study over lambda and K.",
     )
     parser.add_argument(
         "--stop-on-error",
-        action="bool",
+        action="store_true",
         default=True,
         help="Stop immediately if any sub-experiment fails (default: True).",
     )
@@ -155,17 +155,17 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     # 3) Build experiment plan
     steps: list[tuple[str, callable]] = []
     if not args.skip_baselines:
-        # run_baselines.main() runs all 4 clustering baselines. :contentReference[oaicite:5]{index=5}
-        steps.append(("Baseline clustering", run_baselines.main))
+        # run_baselines() runs all 4 clustering baselines. :contentReference[oaicite:5]{index=5}
+        steps.append(("Baseline clustering", lambda: run_baselines([])))
     if not args.skip_rajc:
-        # run_rajc.main() fits and evaluates RAJC. :contentReference[oaicite:6]{index=6}
-        steps.append(("RAJC main experiment", run_rajc.main))
+        # run_rajc() fits and evaluates RAJC. :contentReference[oaicite:6]{index=6}
+        steps.append(("RAJC main experiment", lambda: run_rajc([])))
     if not args.skip_downstream:
-        # run_downstream.main() runs the downstream response prediction comparison. :contentReference[oaicite:7]{index=7}
-        steps.append(("Downstream prediction", run_downstream.main))
+        # run_downstream() runs the downstream response prediction comparison. :contentReference[oaicite:7]{index=7}
+        steps.append(("Downstream prediction", lambda: run_downstream([])))
     if not args.skip_ablation:
-        # run_ablation.main() sweeps over lambda and K. :contentReference[oaicite:8]{index=8}
-        steps.append(("RAJC ablation", run_ablation.main))
+        # run_ablation() sweeps over lambda and K. :contentReference[oaicite:8]{index=8}
+        steps.append(("RAJC ablation", lambda: run_ablation([])))
 
     if not steps:
         logger.warning("No steps selected to run (all were skipped). Nothing to do.")
