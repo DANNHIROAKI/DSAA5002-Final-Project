@@ -259,7 +259,7 @@ def _generate_plots(logger: logging.Logger) -> None:
     # -------------------- 1) Baseline: RFM KMeans Elbow --------------------
     try:
         logger.info("Generating elbow curve for RFM K-Means baseline.")
-        rfm_df = build_rfm_features(cleaned)
+        rfm_df = build_rfm_features(cleaned).rename(columns=str.lower)
         rfm = rfm_df[["recency", "frequency", "monetary"]]
 
         ks: List[int] = list(range(2, 9))
@@ -334,11 +334,13 @@ def _generate_plots(logger: logging.Logger) -> None:
     # -------------------- 3) Customer profile plots ------------------------
     try:
         logger.info("Generating RAJC profile plots (income, RFM, channels, etc.).")
-        rfm_df = build_rfm_features(cleaned)
+        rfm_df = build_rfm_features(cleaned).rename(columns=str.lower)
         clusters = rajc_assignments
 
         # 3.1 收入 vs 总消费
-        fig = plot_income_vs_spent(rfm_df, clusters)
+        fig = plot_income_vs_spent(
+            rfm_df, clusters, income_col="income", monetary_col="monetary"
+        )
         fig.savefig(
             FIG_PROFILES_DIR / "rajc_income_vs_monetary.png",
             bbox_inches="tight",

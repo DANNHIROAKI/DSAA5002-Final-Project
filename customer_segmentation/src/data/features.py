@@ -284,10 +284,20 @@ def assemble_feature_table(
     - transformer: sklearn ColumnTransformer，用于后续 split_behavior_and_response_features
     """
 
-    if label_col not in df.columns:
-        raise KeyError(f"Label column '{label_col}' not found. Did you call add_response_label()?")
-
     work = df.copy()
+
+    # If the label column is missing, derive it from the campaign response columns.
+    # This makes the function robust when callers forget to explicitly add the label
+    # via add_response_label beforehand.
+    if label_col not in work.columns:
+        try:
+            work = add_response_label(work, label_col=label_col)
+        except KeyError as exc:
+            raise KeyError(
+                f"Label column '{label_col}' not found and campaign columns are missing. "
+                "Please ensure the raw data includes AcceptedCmp1-5 and Response, or "
+                "call add_response_label() prior to assemble_feature_table()."
+            ) from exc
 
     # log1p 变换：Income + 所有 Mnt* + Spent/Monetary
     amount_cols = [

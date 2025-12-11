@@ -164,8 +164,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     logger.info("Saved RAJC metrics to %s", metrics_path)
 
     assignments_path = TABLE_DIR / "rajc_assignments.csv"
-    # assignments_ is already a Series with aligned index.
-    model.assignments_.to_csv(assignments_path, header=True)
+    assignments_series = pd.Series(
+        model.assignments_, index=features.index, name="cluster"
+    )
+    assignments_series.to_csv(assignments_path, header=True)
     logger.info("Saved RAJC assignments to %s", assignments_path)
 
 
