@@ -178,7 +178,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     args = _parse_args(argv)
 
     try:
-        features_full, responses, behavior_features = _prepare_features()
+        features_full, labels, behavior_features = _prepare_features()
     except FileNotFoundError as exc:
         logger.error("%s", exc)
         logger.error(
@@ -187,12 +187,18 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         )
         sys.exit(1)
 
+    logger.info(
+        "Running downstream prediction on %d samples with %d base features.",
+        features_full.shape[0],
+        features_full.shape[1],
+    )
+
     train_x_full, test_x_full, train_y, test_y = train_test_split(
         features_full,
-        responses,
+        labels,
         test_size=args.test_size,
         random_state=args.random_state,
-        stratify=responses,
+        stratify=labels,
     )
 
     # Align behavioural subset with the train/test split.
@@ -208,9 +214,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     base_metrics["model"] = "base"
     results.append(base_metrics)
 
-    # 2) KMeans clusters (clustering on behaviour features, classifier uses full)
+    # 2) KMeans clusters as features
     logger.info("Training logistic regression with KMeans cluster IDs")
-    kmeans_model = KMeansBaseline(KMeansConfig())
+    kmeans_cfg = KMeansConfig(
+        n_clusters=4,
+        init="k-means++",
+        max_iter=300,
+        random_state=args.random_state,
+        n_init=10,
+    )
+    kmeans_model = KMeansBaseline(kmeans_cfg)
     kmeans_model.fit(train_x_beh)
     kmeans_labels_train = kmeans_model.predict(train_x_beh)
     kmeans_labels_test = kmeans_model.predict(test_x_beh)

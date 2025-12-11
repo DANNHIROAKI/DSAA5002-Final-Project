@@ -25,7 +25,7 @@ TABLE_DIR = OUTPUT_DIR / "tables"
 
 # Default grids; can be overridden via CLI.
 DEFAULT_LAMBDA_GRID: List[float] = [0.0, 0.1, 0.3, 1.0, 3.0]
-DEFAULT_GAMMA_GRID: List[float] = [0.0, 0.1, 1.0]
+DEFAULT_GAMMA_GRID: List[float] = [0.0, 0.1, 0.3]
 DEFAULT_CLUSTER_GRID: List[int] = [3, 4, 5, 6]
 
 
@@ -34,11 +34,7 @@ def _ensure_output_dirs() -> None:
 
 
 def _prepare_features() -> tuple[pd.DataFrame, pd.Series]:
-    """Load, clean and featurize the dataset.
-
-    For ablation, we follow the main RAJC experiment and use only
-    **behavioural** features as the clustering space.
-    """
+    """Load data and extract behaviour-only features + response labels."""
     raw = load_raw_data(parse_dates=["Dt_Customer"])
     cleaned = clean_data(raw)
     features_df, labels, transformer = assemble_feature_table(cleaned)
@@ -60,9 +56,11 @@ def _run_single(
         n_clusters=k,
         lambda_=lambda_,
         gamma=gamma,
+        model_type="constant_prob",
     )
     model = RAJCModel(config)
     model.fit(features, labels)
+
     clusters = model.assignments_
 
     scores = clustering_eval.compute_scores(features, clusters)

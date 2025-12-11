@@ -1,21 +1,18 @@
-rajc:
-  # 1) 聚类数：允许模型多切一两个“高响应小簇”
-  n_clusters: 5
+# configs/rajc.yaml
+# RAJC-CP++ 主实验配置
+# 会被 run_rajc.py 读取并传给 RAJCConfig(**config_dict)
 
-  # 2) 联合目标权重：让响应信号有足够影响，但又不完全盖过几何结构
-  lambda: 0.3
+n_clusters: 4
+lambda_: 0.3
+gamma: 0.1          # 簇级极化正则（设置为 0 即为基础 RAJC-CP）
+smoothing: 1.0      # Laplace 平滑 alpha
+max_iter: 30
+tol: 0.001
 
-  # 3) 响应正则/稳定项（RAJC‑v2 才有）
-  gamma: 0.1
+random_state: 42
+kmeans_n_init: 20
+logreg_max_iter: 200
 
-  # 4) 优化相关
-  max_iter: 30        # 外层交替优化最大迭代轮数
-  tol: 1e-3           # 收敛阈值，太小意义不大，反而浪费时间
-  random_state: 42
-
-  # 5) 初始化与子模型训练
-  kmeans_n_init: 20   # 初始化跑多几次，避免垃圾初始簇
-  smoothing: 1.0      # 如果你有平滑先验/拉普拉斯平滑，用默认即可
-  model_type: "constant_prob"  # 保持你现在在日志里用的配置
-  logistic_regression:
-    max_iter: 500     # 确保簇内 LR 基本都能收敛
+# 当前实现只支持 "constant_prob"，
+# 如果未来实现 RAJC-L，可将其设为 "logreg"
+model_type: constant_prob

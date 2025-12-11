@@ -1,149 +1,114 @@
-"""Data cleaning and preprocessing routines."""
-
+# src/data/preprocess.py
 from __future__ import annotations
 
-from typing import Iterable, Tuple
+from typing import Tuple
 
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
-# Reference year used to derive age from Year_Birth.
-REFERENCE_YEAR = 2024
 
-# Quantiles used to mitigate extreme outliers (Winsorization),
-# consistent with the Tutorial's suggestion to handle Income and Age outliers. :contentReference[oaicite:1]{index=1}
-INCOME_CLIP_QUANTILES = (0.01, 0.99)
-AGE_CLIP_QUANTILES = (0.01, 0.99)
+REFERENCE_YEAR = 2024  # 用于计算 Age 的参考年份，可按需要调整
 
 
-def _clip_outliers(series: pd.Series, quantiles: Tuple[float, float]) -> pd.Series:
-    """Clip a numeric series to the given lower/upper quantiles.
+def _fill_missing(df: pd.DataFrame) -> pd.DataFrame:
+    """数值特征用中位数，类别特征用众数填补缺失。"""
+    out = df.copy()
 
-    Non-numeric series are returned unchanged.
-    """
-    if not np.issubdtype(series.dtype, np.number):
-        return series
+    numeric_cols = out.select_dtypes(include=[np.number]).columns
+    categorical_cols = out.select_dtypes(exclude=[np.number]).columns
 
-    lower, upper = series.quantile(quantiles[0]), series.quantile(quantiles[1])
+    for col in numeric_cols:
+        median = out[col].median()
+        out[col] = out[col].fillna(median)
+
+    for col in categorical_cols:
+        mode = out[col].mode(dropna=True)
+        if not mode.empty:
+            out[col] = out[col].fillna(mode.iloc[0])
+        else:
+            out[col] = out[col].fillna("Unknown")
+
+    return out
+
+
+def _clip_outliers(series: pd.Series, lower_q: float = 0.01, upper_q: float = 0.99) -> pd.Series:
+    """按给定分位数做 winsorization，减少极端值影响。"""
+    lower = series.quantile(lower_q)
+    upper = series.quantile(upper_q)
     return series.clip(lower=lower, upper=upper)
 
 
-def _fill_missing(
+def clean_data(
     df: pd.DataFrame,
-    categorical_cols: Iterable[str],
-    numeric_cols: Iterable[str],
+    reference_year: int = REFERENCE_YEAR,
+    clip_quantiles: Tuple[float, float] = (0.01, 0.99),
 ) -> pd.DataFrame:
-    """Fill missing values using median for numerics and mode for categoricals."""
-    filled = df.copy()
-
-    for col in numeric_cols:
-        if col in filled:
-            median = filled[col].median()
-            filled[col] = filled[col].fillna(median)
-
-    for col in categorical_cols:
-        if col in filled and not filled[col].empty:
-            mode = filled[col].mode(dropna=True)
-            if not mode.empty:
-                filled[col] = filled[col].fillna(mode.iloc[0])
-
-    return filled
-
-
-def clean_data(df: pd.DataFrame) -> pd.DataFrame:
-    """Handle missing values, derive age, and mitigate outliers.
-
-    Steps
-    -----
-    1. Drop duplicate rows.
-    2. Parse ``Dt_Customer`` as datetime when present.
-    3. Separate categorical vs numeric columns.
-    4. Median/mode imputation for numeric/categorical columns.
-    5. Derive ``Age`` from ``Year_Birth`` using :data:`REFERENCE_YEAR`.
-    6. Winsorize ``Income`` and ``Age`` using quantile clipping to reduce
-       the impact of extreme outliers, reflecting the instructor's recommendation
-       to handle obvious outliers in these fields. :contentReference[oaicite:2]{index=2}
-
-    Parameters
-    ----------
-    df :
-        Raw marketing campaign DataFrame.
-
-    Returns
-    -------
-    pd.DataFrame
-        Cleaned DataFrame suitable for downstream feature engineering.
     """
-    cleaned = df.copy()
+    清洗原始 marketing_campaign 数据：
+    1. 去重
+    2. 解析 Dt_Customer，计算 customer_tenure_days
+    3. 由 Year_Birth 计算 Age
+    4. 填补缺失
+    5. 对 Age 与 Income 做分位数裁剪（winsorization）
+    """
 
-    # Remove exact duplicate rows
-    cleaned = cleaned.drop_duplicates().reset_index(drop=True)
+    out = df.copy()
 
-    # Parse join date if available
-    if "Dt_Customer" in cleaned.columns:
-        cleaned["Dt_Customer"] = pd.to_datetime(cleaned["Dt_Customer"], errors="coerce")
+    # 去重
+    out = out.drop_duplicates().reset_index(drop=True)
 
-    # Identify categorical and numeric columns
-    categorical_cols = [
-        col
-        for col in cleaned.columns
-        if cleaned[col].dtype == "object"
-        or str(cleaned[col].dtype).startswith("category")
-    ]
-    numeric_cols = [col for col in cleaned.columns if col not in categorical_cols]
+    # 解析日期、计算关系长度（天）
+    if "Dt_Customer" in out.columns:
+        out["Dt_Customer"] = pd.to_datetime(out["Dt_Customer"], errors="coerce")
+        max_date = out["Dt_Customer"].max()
+        out["customer_tenure_days"] = (max_date - out["Dt_Customer"]).dt.days
+    else:
+        out["customer_tenure_days"] = 0
 
-    cleaned = _fill_missing(cleaned, categorical_cols, numeric_cols)
+    # 计算 Age
+    if "Year_Birth" in out.columns:
+        out["Age"] = reference_year - out["Year_Birth"]
+    else:
+        out["Age"] = np.nan
 
-    # Age derived from Year_Birth
-    if "Year_Birth" in cleaned.columns:
-        cleaned["Age"] = REFERENCE_YEAR - cleaned["Year_Birth"]
+    # 缺失值填补
+    out = _fill_missing(out)
 
-    # Winsorize Income and Age to soften the effect of extreme outliers
-    if "Income" in cleaned.columns:
-        cleaned["Income"] = _clip_outliers(cleaned["Income"], INCOME_CLIP_QUANTILES)
+    # Age & Income 的 winsorization，呼应课程 PPT 中对 outlier 的处理
+    lower_q, upper_q = clip_quantiles
 
-    if "Age" in cleaned.columns:
-        cleaned["Age"] = _clip_outliers(cleaned["Age"], AGE_CLIP_QUANTILES)
+    if "Age" in out.columns:
+        out["Age"] = _clip_outliers(out["Age"], lower_q, upper_q)
 
-    return cleaned
+    if "Income" in out.columns:
+        out["Income"] = _clip_outliers(out["Income"], lower_q, upper_q)
+
+    return out
 
 
 def train_val_split(
     df: pd.DataFrame,
-    test_size: float = 0.2,
+    val_size: float = 0.2,
     random_state: int = 42,
-    label_col: str = "response",
+    stratify_col: str | None = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Split the cleaned dataset into training and validation subsets with stratification.
-
-    This helper works both *before* and *after* label construction:
-
-    - If ``label_col`` is present, a stratified split on the label is performed
-      (useful for downstream response prediction).
-    - If the label column is absent, the split is purely random.
-
-    Parameters
-    ----------
-    df :
-        Cleaned DataFrame containing (optionally) the label column.
-    test_size :
-        Fraction of the data to use as the validation set.
-    random_state :
-        Random seed for reproducibility.
-    label_col :
-        Name of the label column used for stratification. If absent, no
-        stratification is applied.
-
-    Returns
-    -------
-    train_df, val_df :
-        Two DataFrames with disjoint indices.
     """
-    stratify_target = df[label_col] if label_col in df.columns else None
-    return train_test_split(
+    可选：将数据简单划分为 train / validation。
+    对无监督聚类不是必须，但在需要做弱监督调参时很有用。
+    """
+    if stratify_col is not None:
+        if stratify_col not in df.columns:
+            raise KeyError(f"Column '{stratify_col}' not found for stratification.")
+        stratify_vals = df[stratify_col]
+    else:
+        stratify_vals = None
+
+    train_df, val_df = train_test_split(
         df,
-        test_size=test_size,
+        test_size=val_size,
         random_state=random_state,
-        stratify=stratify_target,
+        stratify=stratify_vals,
     )
+
+    return train_df.reset_index(drop=True), val_df.reset_index(drop=True)

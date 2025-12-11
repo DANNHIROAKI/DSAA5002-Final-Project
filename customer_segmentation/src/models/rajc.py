@@ -1,475 +1,295 @@
-"""Response-Aware Joint Clustering (RAJC) implementations.
-
-This module implements two closely related variants of RAJC:
-
-1) RAJC-v2 with *cluster-wise constant probabilities* (default)
-   - model_type = "constant_prob"
-   - Each cluster k is characterized by a single response probability p_k.
-   - The joint objective directly encourages clusters to have homogeneous
-     promotion-response behaviour and large inter-cluster differences.
-
-2) Original RAJC with *per-cluster logistic regression*
-   - model_type = "logreg"
-   - Each cluster k owns a local logistic regression (w_k, b_k).
-   - Kept mainly for ablation or comparison.
-
-The public API (RAJCConfig, RAJCModel, run_rajc) remains backward compatible.
-"""
-
+# src/models/rajc.py
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Optional, Tuple
 
 import numpy as np
-import pandas as pd
 from sklearn.cluster import KMeans
-from sklearn.linear_model import LogisticRegression
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-class _ConstantProbClassifier:
-    """Cluster-level classifier that always outputs a fixed probability.
-
-    Used in the original RAJC (logreg mode) as a robust fallback when a
-    cluster contains only one class and LogisticRegression cannot be fitted.
-    """
-
-    def __init__(self, p: float):
-        self.p = float(np.clip(p, 1e-7, 1 - 1e-7))
-
-    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        n = X.shape[0]
-        p = np.full(n, self.p, dtype=float)
-        return np.column_stack([1.0 - p, p])
 
 
 @dataclass
 class RAJCConfig:
-    """Configuration for the RAJC alternating optimization algorithm.
+    """
+    配置响应感知联合聚类模型（RAJC-CP++）。
 
-    Parameters
-    ----------
-    n_clusters :
-        Number of clusters K.
-    lambda_ :
-        Trade-off between clustering distortion and response loss.
-    gamma :
-        Optional polarization regularizer weight. When > 0 (in constant_prob
-        mode), it encourages cluster-level probabilities p_k to be closer to
-        0 or 1 by penalizing p_k(1 - p_k). The term is not used directly in
-        the E/M steps here but can be leveraged in model selection.
-    max_iter :
-        Maximum number of outer alternating-optimization iterations.
-    tol :
-        Early-stopping tolerance on the fraction of samples that change
-        cluster between iterations.
-    random_state :
-        Random seed for reproducibility.
-    smoothing :
-        Laplace smoothing strength when estimating cluster probabilities
-        p_k = (pos_k + smoothing) / (n_k + 2 * smoothing).
-    logreg_max_iter :
-        Max iterations for per-cluster LogisticRegression in "logreg" mode.
-    kmeans_n_init :
-        Number of KMeans initializations for RAJC initialization.
-    model_type :
-        Either "constant_prob" (RAJC-v2, recommended) or "logreg"
-        (original RAJC with per-cluster logistic regressions).
+    - n_clusters: 簇的个数 K
+    - lambda_: 行为距离 vs 响应交叉熵 的权衡系数
+    - gamma: 簇级极化正则系数（>0 鼓励高/低响应簇）
+    - smoothing: Laplace 平滑系数 alpha
+    - max_iter: 最大迭代轮数
+    - tol: 簇标签变化比例小于 tol 即停止
+    - random_state: 随机种子（用于 KMeans 初始化）
+    - kmeans_n_init: KMeans 初始化次数
+    - model_type: 当前实现支持 "constant_prob"；其它值会报错
     """
 
     n_clusters: int = 4
-    lambda_: float = 1.0
+    lambda_: float = 0.3
     gamma: float = 0.0
-    max_iter: int = 20
-    tol: float = 1e-4
-    random_state: int = 42
     smoothing: float = 1.0
-    logreg_max_iter: int = 200
+    max_iter: int = 30
+    tol: float = 1e-3
+    random_state: Optional[int] = 42
     kmeans_n_init: int = 10
-    model_type: str = "constant_prob"  # "constant_prob" or "logreg"
-
-
-def _initialize_assignments(
-    features: pd.DataFrame,
-    n_clusters: int,
-    random_state: int,
-    n_init: int,
-) -> pd.Series:
-    """Initialize cluster assignments with a standard K-Means run."""
-    kmeans = KMeans(
-        n_clusters=n_clusters,
-        random_state=random_state,
-        n_init=n_init,
-    )
-    labels = kmeans.fit_predict(features)
-    return pd.Series(labels, index=features.index, name="cluster")
-
-
-def _update_centers(
-    features: pd.DataFrame,
-    assignments: pd.Series,
-    n_clusters: int,
-    random_state: int,
-) -> pd.DataFrame:
-    """Update cluster centers as the mean of assigned samples.
-
-    Empty clusters are re-seeded with a random sample to avoid collapse.
-    """
-    centers = []
-    for cluster_id in range(n_clusters):
-        cluster_idx = assignments[assignments == cluster_id].index
-        if len(cluster_idx) == 0:
-            centers.append(
-                features.sample(1, random_state=random_state + cluster_id).iloc[0]
-            )
-        else:
-            centers.append(features.loc[cluster_idx].mean(axis=0))
-    return pd.DataFrame(centers, index=range(n_clusters))
-
-
-# ----- Helpers for original RAJC (logreg mode) ---------------------------------
-
-
-def _fit_cluster_classifiers_logreg(
-    features: pd.DataFrame,
-    labels: pd.Series,
-    assignments: pd.Series,
-    config: RAJCConfig,
-) -> Dict[int, object]:
-    """Fit per-cluster classifiers (logistic regression or constant-prob)."""
-    classifiers: Dict[int, object] = {}
-    for cluster_id in range(config.n_clusters):
-        idx = assignments[assignments == cluster_id].index
-        if len(idx) == 0:
-            continue
-
-        X_cluster = features.loc[idx]
-        y_cluster = labels.loc[idx]
-
-        if y_cluster.nunique() < 2:
-            # Only one class present -> use constant classifier
-            p = float(y_cluster.mean())
-            clf: object = _ConstantProbClassifier(p)
-        else:
-            clf = LogisticRegression(
-                max_iter=config.logreg_max_iter,
-                class_weight="balanced",
-            )
-            clf.fit(X_cluster, y_cluster)
-
-        classifiers[cluster_id] = clf
-    return classifiers
-
-
-def _compute_cost_matrix_logreg(
-    features: pd.DataFrame,
-    labels: Optional[pd.Series],
-    centers: pd.DataFrame,
-    classifiers: Dict[int, object],
-    config: RAJCConfig,
-) -> np.ndarray:
-    """Compute cost matrix for RAJC in 'logreg' mode.
-
-    Each entry (i, k) equals:
-        ||x_i - μ_k||^2 + λ * logloss_i,k
-    where the second term is the logistic loss under cluster-k classifier if
-    labels are provided; otherwise it is 0 (for pure distance-based assignment).
-    """
-    n_samples = len(features)
-    n_clusters = config.n_clusters
-    costs = np.zeros((n_samples, n_clusters), dtype=float)
-    feature_matrix = features.to_numpy()
-
-    for k in range(n_clusters):
-        center_vec = centers.loc[k].to_numpy()
-        sq_dist = np.sum((feature_matrix - center_vec) ** 2, axis=1)
-
-        if labels is not None and k in classifiers:
-            probs = classifiers[k].predict_proba(features)[:, 1]
-            probs = np.clip(probs, 1e-7, 1 - 1e-7)
-            y = labels.to_numpy()
-            logloss = -(y * np.log(probs) + (1 - y) * np.log(1 - probs))
-        else:
-            logloss = np.zeros(n_samples, dtype=float)
-
-        costs[:, k] = sq_dist + config.lambda_ * logloss
-
-    return costs
-
-
-# ----- Helpers for RAJC-v2 (constant_prob mode) --------------------------------
+    logreg_max_iter: int = 200  # 预留给将来的 RAJC-L，当前未使用
+    model_type: str = "constant_prob"
 
 
 def _update_cluster_probs(
-    labels: pd.Series,
-    assignments: pd.Series,
+    labels: np.ndarray,
+    assignments: np.ndarray,
     n_clusters: int,
     smoothing: float,
     global_rate: float,
 ) -> np.ndarray:
-    """Estimate cluster-wise constant probabilities with Laplace smoothing."""
+    """
+    根据当前簇分配，计算每个簇的平滑后响应概率 p_k。
+    空簇回退为全局响应率。
+    """
+    alpha = smoothing
     probs = np.zeros(n_clusters, dtype=float)
-    y = labels.to_numpy()
 
     for k in range(n_clusters):
         mask = assignments == k
         n_k = int(mask.sum())
         if n_k == 0:
-            # Empty cluster falls back to global rate.
-            p_k = global_rate
-        else:
-            pos = float(y[mask.to_numpy()].sum())
-            p_k = (pos + smoothing) / (n_k + 2.0 * smoothing)
+            probs[k] = global_rate
+            continue
 
-        probs[k] = np.clip(p_k, 1e-6, 1 - 1e-6)
+        pos = labels[mask].sum()
+        p_k = (pos + alpha) / (n_k + 2.0 * alpha)
+        probs[k] = p_k
 
+    # 防止 log(0)
+    eps = 1e-6
+    probs = np.clip(probs, eps, 1.0 - eps)
     return probs
 
 
 def _compute_cost_matrix_constant(
-    features: pd.DataFrame,
-    labels: pd.Series,
-    centers: pd.DataFrame,
+    features: np.ndarray,
+    labels: np.ndarray,
+    centers: np.ndarray,
     cluster_probs: np.ndarray,
     config: RAJCConfig,
 ) -> np.ndarray:
-    """Compute cost matrix for RAJC-v2 (cluster-wise constant probabilities).
-
-    For each sample i and cluster k:
-
-        cost_{ik} = ||x_i - μ_k||^2
-                    + λ * CE(y_i ; p_k),
-
-    where CE is the binary cross-entropy using the cluster-wise constant
-    probability p_k.
     """
-    X = features.to_numpy()  # (n, d)
-    centers_np = centers.to_numpy()  # (K, d)
-    n, d = X.shape
-    K = centers_np.shape[0]
+    计算 RAJC-CP++ 的 cost 矩阵：
+    cost_{ik} = ||x_i - mu_k||^2 + lambda * CE(y_i; p_k) + gamma * p_k(1-p_k)
+    """
+    # 欧式距离平方项 (n, K)
+    diff = features[:, None, :] - centers[None, :, :]
+    sq_dist = np.sum(diff * diff, axis=2)
 
-    # Squared distances: (n, K)
-    diff = X[:, None, :] - centers_np[None, :, :]
-    sq_dist = np.sum(diff**2, axis=2)
-
-    # Cluster-wise constant probabilities, broadcast to (n, K)
-    y = labels.to_numpy().reshape(-1, 1)  # (n, 1)
-    p = cluster_probs.reshape(1, -1)  # (1, K)
-
-    # Binary cross-entropy CE(y, p)
+    # 交叉熵项 (n, K) - 利用广播
+    y = labels.reshape(-1, 1)
+    p = cluster_probs.reshape(1, -1)
     ce = -(y * np.log(p) + (1.0 - y) * np.log(1.0 - p))
 
-    return sq_dist + config.lambda_ * ce
+    # 极化正则项：对每个簇是常数，在样本维上广播
+    polarization = cluster_probs * (1.0 - cluster_probs)  # (K,)
+    polarization_penalty = config.gamma * polarization.reshape(1, -1)
 
-
-# ---------------------------------------------------------------------------
-# Main RAJC model
-# ---------------------------------------------------------------------------
+    cost = sq_dist + config.lambda_ * ce + polarization_penalty
+    return cost
 
 
 class RAJCModel:
-    """Response-Aware Joint Clustering model with alternating optimization.
+    """
+    响应感知联合聚类模型 (RAJC-CP++)，簇级常数概率版本。
 
-    The behavior is controlled by :class:`RAJCConfig`:
-
-    - model_type = "constant_prob"  -> RAJC-v2 with cluster-wise p_k (recommended).
-    - model_type = "logreg"         -> original RAJC with per-cluster logistic models.
+    使用方法（典型）：
+        rajc_cfg = RAJCConfig(...)
+        model = RAJCModel(rajc_cfg)
+        model.fit(X_behavior, y)
+        cluster_labels = model.assignments_
+        prob = model.predict_response(X_behavior_new)
     """
 
-    def __init__(self, config: Optional[RAJCConfig] = None):
-        self.config = config or RAJCConfig()
-        self.centers_: Optional[pd.DataFrame] = None
-        self.assignments_: Optional[pd.Series] = None
+    def __init__(self, config: RAJCConfig):
+        self.config = config
 
-        # Attributes for logreg mode
-        self.classifiers_: Dict[int, object] = {}
-
-        # Attributes for constant_prob mode
+        # 拟合后填充的属性
+        self.centers_: Optional[np.ndarray] = None
         self.cluster_probs_: Optional[np.ndarray] = None
+        self.assignments_: Optional[np.ndarray] = None
+        self.global_response_rate_: Optional[float] = None
 
-        # Shared
-        self.global_response_rate_: float = 0.5
+        self._is_fitted: bool = False
 
-    # ----- public API -----------------------------------------------------
+    # --------- 对外 API ---------
 
-    def fit(self, features: pd.DataFrame, labels: pd.Series) -> "RAJCModel":
-        """Run alternating optimization to jointly learn clusters and response model."""
-        self.global_response_rate_ = float(labels.mean())
+    def fit(
+        self,
+        features: np.ndarray,
+        labels: np.ndarray,
+        full_features: Optional[np.ndarray] = None,
+    ) -> "RAJCModel":
+        """
+        拟合模型。
 
-        if self.config.model_type == "logreg":
-            self._fit_logreg_mode(features, labels)
-        else:
-            # default and recommended
-            self._fit_constant_prob_mode(features, labels)
+        参数：
+        - features: 用于聚类的行为特征 (n, d)
+        - labels: 二元响应标签 (n,)
+        - full_features: 预留给 RAJC-L 的额外特征，目前未使用
+        """
+        features = np.asarray(features, dtype=float)
+        labels = np.asarray(labels, dtype=int).ravel()
 
+        if self.config.model_type != "constant_prob":
+            raise ValueError(
+                f"Unsupported model_type '{self.config.model_type}'. "
+                "Current implementation only supports 'constant_prob'."
+            )
+
+        self._fit_constant_prob_mode(features, labels)
+        self._is_fitted = True
         return self
 
-    def predict_clusters(self, features: pd.DataFrame) -> pd.Series:
-        """Assign clusters for new samples using learned centers.
-
-        Assignments here are always based solely on distances to cluster centers,
-        since ground-truth labels are not available at inference time.
+    def predict_clusters(self, features: np.ndarray) -> np.ndarray:
         """
-        if self.centers_ is None:
-            raise ValueError("Model has not been fitted yet.")
+        仅根据行为特征和簇中心进行最近簇分配。
+        """
+        if not self._is_fitted or self.centers_ is None:
+            raise RuntimeError("RAJCModel is not fitted yet.")
 
-        X = features.to_numpy()
-        centers_np = self.centers_.to_numpy()
-        diff = X[:, None, :] - centers_np[None, :, :]
-        sq_dist = np.sum(diff**2, axis=2)  # (n, K)
-        labels = np.argmin(sq_dist, axis=1)
-        return pd.Series(labels, index=features.index, name="cluster")
+        X = np.asarray(features, dtype=float)
+        diff = X[:, None, :] - self.centers_[None, :, :]
+        sq_dist = np.sum(diff * diff, axis=2)
+        return np.argmin(sq_dist, axis=1)
 
-    def predict_response(self, features: pd.DataFrame) -> pd.Series:
-        """Predict promotion-response probabilities for given samples."""
-        if self.centers_ is None:
-            raise ValueError("Model has not been fitted yet.")
+    def predict_response(self, features: np.ndarray) -> np.ndarray:
+        """
+        对新样本预测响应概率：
+        - constant_prob: 使用簇级概率 p_k
+        """
+        if not self._is_fitted or self.cluster_probs_ is None:
+            raise RuntimeError("RAJCModel is not fitted yet.")
 
-        cluster_labels = self.predict_clusters(features)
+        clusters = self.predict_clusters(features)
+        probs = self.cluster_probs_[clusters]
 
-        if self.config.model_type == "logreg":
-            if self.classifiers_ is None:
-                raise ValueError("Logistic classifiers have not been fitted.")
-            preds = pd.Series(index=features.index, dtype=float)
-
-            for cluster_id, clf in self.classifiers_.items():
-                idx = cluster_labels[cluster_labels == cluster_id].index
-                if len(idx) == 0:
-                    continue
-                probs = clf.predict_proba(features.loc[idx])[:, 1]
-                preds.loc[idx] = probs
-
-            # Fill any remaining NaNs (e.g., unseen empty clusters) with global rate
-            preds = preds.fillna(self.global_response_rate_)
-            return preds
-
-        # constant_prob mode: just map cluster -> p_k
-        if self.cluster_probs_ is None:
-            raise ValueError("Cluster probabilities have not been estimated.")
-
-        probs = np.full(len(features), self.global_response_rate_, dtype=float)
-        for k in range(self.config.n_clusters):
-            idx = cluster_labels[cluster_labels == k].index
-            if len(idx) == 0:
-                continue
-            probs[features.index.get_indexer(idx)] = self.cluster_probs_[k]
-
-        return pd.Series(probs, index=features.index, name="response_prob")
-
-    # ----- internal training routines -------------------------------------
-
-    def _fit_logreg_mode(self, features: pd.DataFrame, labels: pd.Series) -> None:
-        """Original RAJC training with per-cluster logistic regressions."""
-        # Initialization
-        assignments = _initialize_assignments(
-            features,
-            self.config.n_clusters,
-            self.config.random_state,
-            self.config.kmeans_n_init,
-        )
-        centers = _update_centers(
-            features, assignments, self.config.n_clusters, self.config.random_state
-        )
-
-        # Alternating optimization
-        for _ in range(self.config.max_iter):
-            classifiers = _fit_cluster_classifiers_logreg(
-                features, labels, assignments, self.config
-            )
-            costs = _compute_cost_matrix_logreg(
-                features, labels, centers, classifiers, self.config
-            )
-            new_assignments = pd.Series(
-                np.argmin(costs, axis=1),
-                index=features.index,
-                name="cluster",
+        # 极少数意外情况（例如 cluster id 超出范围）回退到全局响应率
+        if self.global_response_rate_ is not None:
+            global_rate = float(self.global_response_rate_)
+            probs = np.where(
+                np.logical_or(clusters < 0, clusters >= len(self.cluster_probs_)),
+                global_rate,
+                probs,
             )
 
-            shift = (assignments != new_assignments).mean()
-            assignments = new_assignments
-            centers = _update_centers(
-                features, assignments, self.config.n_clusters, self.config.random_state
-            )
+        return probs
 
-            if shift < self.config.tol:
-                break
+    # --------- 内部实现：RAJC-CP++ constant probability 模式 ---------
 
-        # Final fit
-        self.assignments_ = assignments
-        self.centers_ = centers
-        self.classifiers_ = _fit_cluster_classifiers_logreg(
-            features, labels, assignments, self.config
-        )
-        self.cluster_probs_ = None  # not used in this mode
+    def _fit_constant_prob_mode(
+        self,
+        features: np.ndarray,
+        labels: np.ndarray,
+    ) -> None:
+        n_samples, n_features = features.shape
+        cfg = self.config
 
-    def _fit_constant_prob_mode(self, features: pd.DataFrame, labels: pd.Series) -> None:
-        """RAJC-v2 training with cluster-wise constant probabilities."""
-        # Initialization via KMeans
-        assignments = _initialize_assignments(
-            features,
-            self.config.n_clusters,
-            self.config.random_state,
-            self.config.kmeans_n_init,
+        # KMeans 初始化
+        kmeans = KMeans(
+            n_clusters=cfg.n_clusters,
+            n_init=cfg.kmeans_n_init,
+            random_state=cfg.random_state,
         )
-        centers = _update_centers(
-            features, assignments, self.config.n_clusters, self.config.random_state
-        )
+        assignments = kmeans.fit_predict(features)
+        centers = kmeans.cluster_centers_
+
+        global_rate = float(labels.mean())
         cluster_probs = _update_cluster_probs(
-            labels,
-            assignments,
-            self.config.n_clusters,
-            self.config.smoothing,
-            self.global_response_rate_,
+            labels=labels,
+            assignments=assignments,
+            n_clusters=cfg.n_clusters,
+            smoothing=cfg.smoothing,
+            global_rate=global_rate,
         )
 
-        # Alternating optimization
-        for _ in range(self.config.max_iter):
-            costs = _compute_cost_matrix_constant(
-                features, labels, centers, cluster_probs, self.config
+        for it in range(cfg.max_iter):
+            # E-step: 更新簇分配
+            cost = _compute_cost_matrix_constant(
+                features=features,
+                labels=labels,
+                centers=centers,
+                cluster_probs=cluster_probs,
+                config=cfg,
             )
-            new_assignments = pd.Series(
-                np.argmin(costs, axis=1),
-                index=features.index,
-                name="cluster",
-            )
+            new_assignments = np.argmin(cost, axis=1)
 
-            shift = (assignments != new_assignments).mean()
+            change_ratio = np.mean(new_assignments != assignments)
             assignments = new_assignments
-            centers = _update_centers(
-                features, assignments, self.config.n_clusters, self.config.random_state
-            )
+
+            # M-step: 更新中心 & 簇级概率
+            centers = self._update_centers(features, assignments, cfg.n_clusters)
             cluster_probs = _update_cluster_probs(
-                labels,
-                assignments,
-                self.config.n_clusters,
-                self.config.smoothing,
-                self.global_response_rate_,
+                labels=labels,
+                assignments=assignments,
+                n_clusters=cfg.n_clusters,
+                smoothing=cfg.smoothing,
+                global_rate=global_rate,
             )
 
-            if shift < self.config.tol:
+            if change_ratio < cfg.tol:
                 break
 
-        self.assignments_ = assignments
         self.centers_ = centers
         self.cluster_probs_ = cluster_probs
-        self.classifiers_ = {}  # not used in this mode
+        self.assignments_ = assignments
+        self.global_response_rate_ = global_rate
 
+    @staticmethod
+    def _update_centers(
+        features: np.ndarray,
+        assignments: np.ndarray,
+        n_clusters: int,
+    ) -> np.ndarray:
+        """
+        按当前簇分配更新簇中心，对空簇随机重启。
+        """
+        n_samples, n_features = features.shape
+        centers = np.zeros((n_clusters, n_features), dtype=float)
 
-def run_rajc(
-    features: pd.DataFrame,
-    labels: pd.Series,
-    config: Optional[RAJCConfig] = None,
-) -> Tuple[RAJCModel, pd.Series]:
-    """Train RAJC and return the model plus cluster assignments.
+        rng = np.random.default_rng()
 
-    By default this uses RAJC-v2 (constant_prob). To reproduce the original
-    RAJC behaviour, construct RAJCConfig(model_type="logreg").
-    """
-    model = RAJCModel(config)
-    model.fit(features, labels)
-    return model, model.assignments_
+        for k in range(n_clusters):
+            mask = assignments == k
+            if not np.any(mask):
+                # 空簇：随机重启
+                idx = rng.integers(0, n_samples)
+                centers[k] = features[idx]
+            else:
+                centers[k] = features[mask].mean(axis=0)
+
+        return centers
+
+    # --------- 一些统计信息接口（可选，用于可视化 / 评估） ---------
+
+    def get_cluster_stats(self, labels: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        返回：
+        - counts: 每个簇的样本数
+        - response_rates: 每个簇的真实响应率（不带平滑）
+        """
+        if not self._is_fitted or self.assignments_ is None:
+            raise RuntimeError("RAJCModel is not fitted yet.")
+
+        assignments = self.assignments_
+        labels = np.asarray(labels, dtype=int).ravel()
+
+        counts = np.zeros(self.config.n_clusters, dtype=int)
+        rates = np.zeros(self.config.n_clusters, dtype=float)
+
+        for k in range(self.config.n_clusters):
+            mask = assignments == k
+            n_k = int(mask.sum())
+            counts[k] = n_k
+            if n_k > 0:
+                rates[k] = labels[mask].mean()
+            else:
+                rates[k] = np.nan
+
+        return counts, rates

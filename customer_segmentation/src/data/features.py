@@ -1,27 +1,7 @@
-"""Feature engineering helpers for RFM, demographic, and channel features.
-
-This module now explicitly distinguishes between:
-
-- *behavior features*: used for all clustering models (incl. RAJC-v2),
-- *response-related features*: only used in downstream response prediction.
-
-`assemble_feature_table` remains backward compatible: it still returns a single
-dense feature matrix, the binary label, and a fitted ColumnTransformer.
-In addition, the returned transformer is enriched with metadata attributes:
-
-- `behavior_numeric_features_`
-- `response_numeric_features_`
-- `categorical_features_`
-- `categorical_feature_names_`
-- `behavior_feature_names_`   (numeric-behavior + all categorical)
-- `response_feature_names_`   (numeric-response only)
-
-These attributes can be used by models such as RAJC-v2 to obtain separate
-behavior and response feature matrices from the same encoded DataFrame.
-"""
-
+# src/data/features.py
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import List, Tuple
 
 import numpy as np
@@ -29,12 +9,9 @@ import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-# ---------------------------------------------------------------------------
-# Label construction
-# ---------------------------------------------------------------------------
 
-# Campaign-related columns used to construct the binary response label.
-CAMPAIGN_COLUMNS = [
+# 原始促销字段（来自数据集）
+CAMPAIGN_COLUMNS: List[str] = [
     "AcceptedCmp1",
     "AcceptedCmp2",
     "AcceptedCmp3",
@@ -43,312 +20,337 @@ CAMPAIGN_COLUMNS = [
     "Response",
 ]
 
+DEFAULT_LABEL_COL = "campaign_response"
 
-def add_response_label(df: pd.DataFrame, label_col: str = "response") -> pd.DataFrame:
-    """Construct a binary promotion-response label from campaign fields.
 
-    A customer is considered a responder (label 1) if they have accepted at least
-    one of the campaigns or the final offer, otherwise 0.
-
-    Parameters
-    ----------
-    df :
-        Input DataFrame containing the campaign columns.
-    label_col :
-        Name of the label column to be created.
-
-    Returns
-    -------
-    pd.DataFrame
-        Copy of ``df`` with an additional binary ``label_col`` column.
-
-    Raises
-    ------
-    KeyError
-        If any of the required campaign columns is missing.
+def add_response_label(
+    df: pd.DataFrame,
+    label_col: str = DEFAULT_LABEL_COL,
+    campaign_cols: List[str] | None = None,
+) -> pd.DataFrame:
     """
-    missing_cols = [col for col in CAMPAIGN_COLUMNS if col not in df.columns]
-    if missing_cols:
-        raise KeyError(
-            f"Missing campaign columns required for label construction: {missing_cols}"
-        )
+    根据 AcceptedCmp1-5 + Response 生成二元促销响应标签。
+
+    y = 1 表示至少在 6 次活动中任意一次接受。
+    """
+    if campaign_cols is None:
+        campaign_cols = CAMPAIGN_COLUMNS
+
+    missing = [c for c in campaign_cols if c not in df.columns]
+    if missing:
+        raise KeyError(f"Missing campaign columns in DataFrame: {missing}")
 
     labeled = df.copy()
-    labeled[label_col] = (labeled[CAMPAIGN_COLUMNS].sum(axis=1) > 0).astype(int)
+    labeled[label_col] = (labeled[campaign_cols].sum(axis=1) > 0).astype(int)
     return labeled
 
 
-# ---------------------------------------------------------------------------
-# Feature engineering
-# ---------------------------------------------------------------------------
+# --------- 特征工程辅助函数 ---------
+
+
+def _log1p_safe(series: pd.Series) -> pd.Series:
+    """对严格非负的长尾金额特征做 log1p 变换。"""
+    # clip 防止极少数负值（如果有的话）
+    s = series.clip(lower=0)
+    return np.log1p(s)
 
 
 def build_rfm_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Compute Recency, Frequency, and Monetary value features.
-
-    Frequency is defined as the sum of web, catalog, and store purchases.
-    Monetary is the sum of all monetary (``Mnt*``) fields.
-    Recency uses the existing ``Recency`` column if present.
-
-    Parameters
-    ----------
-    df :
-        Input DataFrame containing purchase information.
-
-    Returns
-    -------
-    pd.DataFrame
-        Copy of ``df`` with added ``recency``, ``frequency``, and ``monetary`` columns.
     """
-    engineered = df.copy()
+    构造 RFM 三要素 + 总消费 Spent。
+    - Recency: 原始 Recency
+    - Frequency: 各渠道购买次数之和
+    - Monetary / Spent: 所有品类消费金额之和
+    """
+    out = df.copy()
 
-    # Purchase frequency across all channels.
-    engineered["frequency"] = (
-        engineered.get("NumWebPurchases", 0)
-        + engineered.get("NumCatalogPurchases", 0)
-        + engineered.get("NumStorePurchases", 0)
-    )
+    # 频次
+    freq_cols = [
+        "NumWebPurchases",
+        "NumCatalogPurchases",
+        "NumStorePurchases",
+    ]
+    for col in freq_cols:
+        if col not in out.columns:
+            raise KeyError(f"Expected column '{col}' not found in DataFrame.")
 
-    # Total monetary spending across all Mnt* columns.
-    mnt_cols = [col for col in engineered.columns if col.startswith("Mnt")]
-    if mnt_cols:
-        engineered["monetary"] = engineered[mnt_cols].sum(axis=1)
-    else:
-        engineered["monetary"] = np.nan
+    out["Frequency"] = out[freq_cols].sum(axis=1)
 
-    # Recency: smaller value means more recent purchase, consistent with the dataset.
-    engineered["recency"] = engineered.get("Recency", np.nan)
+    # 金额 / Spent
+    mnt_cols = [
+        "MntWines",
+        "MntFruits",
+        "MntMeatProducts",
+        "MntFishProducts",
+        "MntSweetProducts",
+        "MntGoldProds",
+    ]
+    for col in mnt_cols:
+        if col not in out.columns:
+            raise KeyError(f"Expected column '{col}' not found in DataFrame.")
 
-    return engineered
+    out["Monetary"] = out[mnt_cols].sum(axis=1)
+    out["Spent"] = out["Monetary"]
+
+    # Recency 直接沿用
+    if "Recency" not in out.columns:
+        raise KeyError("Expected column 'Recency' not found in DataFrame.")
+
+    return out
 
 
 def add_structural_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Add family composition, tenure, and channel-mix helper features.
-
-    Added fields
-    ------------
-    family_size :
-        1 (customer) + Kidhome + Teenhome.
-    has_child :
-        1 if Kidhome + Teenhome > 0, else 0.
-    customer_tenure_days :
-        (max(Dt_Customer) - Dt_Customer) in days, if join dates are available.
-    *_purchase_ratio :
-        Ratio of purchases from each channel among total purchases.
     """
-    enriched = df.copy()
+    增加家庭结构 / 渠道占比 / 业务相关行为特征：
+    - family_size, has_child
+    - 平均客单价 Avg_Basket
+    - 折扣敏感度 Deal_Sensitivity
+    - 线上强度 Online_Intensity
+    - 品类多样性 Variety_Index
+    - 渠道占比（Web / Catalog / Store）
+    """
+    out = df.copy()
 
-    # Family structure
-    enriched["family_size"] = 1 + enriched.get("Kidhome", 0) + enriched.get("Teenhome", 0)
-    enriched["has_child"] = (
-        (enriched.get("Kidhome", 0) + enriched.get("Teenhome", 0)) > 0
-    ).astype(int)
+    # 家庭结构
+    kid = out.get("Kidhome", 0)
+    teen = out.get("Teenhome", 0)
+    out["family_size"] = 1 + kid + teen
+    out["has_child"] = ((kid + teen) > 0).astype(int)
 
-    # Ensure Dt_Customer is datetime if present.
-    if "Dt_Customer" in enriched.columns and not np.issubdtype(
-        enriched["Dt_Customer"].dtype, np.datetime64
-    ):
-        enriched["Dt_Customer"] = pd.to_datetime(
-            enriched["Dt_Customer"], errors="coerce"
-        )
+    # 购买频次确保存在
+    if "Frequency" not in out.columns:
+        raise KeyError("Please call build_rfm_features() before add_structural_features().")
 
-    if "Dt_Customer" in enriched.columns:
-        latest_date = enriched["Dt_Customer"].max()
-        enriched["customer_tenure_days"] = (latest_date - enriched["Dt_Customer"]).dt.days
+    freq = out["Frequency"].replace(0, np.nan)
+
+    # 平均客单价
+    out["Avg_Basket"] = out["Spent"] / freq
+
+    # 折扣敏感度
+    if "NumDealsPurchases" in out.columns:
+        out["Deal_Sensitivity"] = out["NumDealsPurchases"] / freq
     else:
-        enriched["customer_tenure_days"] = np.nan
+        out["Deal_Sensitivity"] = 0.0
 
-    # Channel mix ratios
-    total_purchases = enriched.get("frequency", 0).astype(float)
-    web = enriched.get("NumWebPurchases", 0).astype(float)
-    catalog = enriched.get("NumCatalogPurchases", 0).astype(float)
-    store = enriched.get("NumStorePurchases", 0).astype(float)
+    # 线上强度
+    if "NumWebPurchases" in out.columns:
+        out["Online_Intensity"] = out["NumWebPurchases"] / freq
+    else:
+        out["Online_Intensity"] = 0.0
 
-    with np.errstate(divide="ignore", invalid="ignore"):
-        enriched["web_purchase_ratio"] = np.where(
-            total_purchases > 0, web / total_purchases, 0.0
-        )
-        enriched["catalog_purchase_ratio"] = np.where(
-            total_purchases > 0, catalog / total_purchases, 0.0
-        )
-        enriched["store_purchase_ratio"] = np.where(
-            total_purchases > 0, store / total_purchases, 0.0
-        )
+    # 渠道占比
+    for col in ["NumWebPurchases", "NumCatalogPurchases", "NumStorePurchases"]:
+        if col not in out.columns:
+            raise KeyError(f"Expected column '{col}' for channel features.")
 
-    return enriched
+    out["Web_Ratio"] = out["NumWebPurchases"] / freq
+    out["Catalog_Ratio"] = out["NumCatalogPurchases"] / freq
+    out["Store_Ratio"] = out["NumStorePurchases"] / freq
 
+    # 品类多样性
+    mnt_cols = [
+        "MntWines",
+        "MntFruits",
+        "MntMeatProducts",
+        "MntFishProducts",
+        "MntSweetProducts",
+        "MntGoldProds",
+    ]
+    out["Variety_Index"] = (out[mnt_cols] > 0).sum(axis=1)
 
-# ---------------------------------------------------------------------------
-# Feature group definitions (behavior vs response-related)
-# ---------------------------------------------------------------------------
+    # 缺失填 0（主要是除以 0 的 NaN）
+    out[["Avg_Basket", "Deal_Sensitivity", "Online_Intensity",
+         "Web_Ratio", "Catalog_Ratio", "Store_Ratio"]] = out[
+        ["Avg_Basket", "Deal_Sensitivity", "Online_Intensity",
+         "Web_Ratio", "Catalog_Ratio", "Store_Ratio"]
+    ].fillna(0.0)
 
-# Numeric behavior features used for clustering (RFM + channels + demographics).
-BEHAVIOR_NUMERIC_FEATURES: List[str] = [
-    "recency",
-    "frequency",
-    "monetary",
-    "Income",
-    "Age",
-    "Kidhome",
-    "Teenhome",
-    "NumWebPurchases",
-    "NumCatalogPurchases",
-    "NumStorePurchases",
-    "customer_tenure_days",
-    "web_purchase_ratio",
-    "catalog_purchase_ratio",
-    "store_purchase_ratio",
-]
-
-# Numeric response-related features used only in downstream prediction
-# (they tend to be strongly correlated with the label but are conceptually
-# not part of "core behavior clustering space").
-RESPONSE_NUMERIC_FEATURES: List[str] = [
-    "NumDealsPurchases",
-    "NumWebVisitsMonth",
-]
-
-# Categorical features (all treated as behavior/demographics).
-CATEGORICAL_FEATURES: List[str] = ["Education", "Marital_Status"]
+    return out
 
 
-# ---------------------------------------------------------------------------
-# Main entry point(s)
-# ---------------------------------------------------------------------------
+@dataclass
+class FeatureConfig:
+    """
+    配置哪些特征属于行为 / 响应 / 类别。
+
+    这里的列名都是“原始表中的列名”，在 transform 后会统一转成小写。
+    """
+
+    behavior_numeric: List[str]
+    response_numeric: List[str]
+    categorical: List[str]
+
+
+def _default_feature_config(df: pd.DataFrame) -> FeatureConfig:
+    """根据数据集列名，构造默认的特征配置。"""
+
+    # 行为数值特征：RFM + 金额 & 结构 & 渠道 + 人口属性
+    behavior_numeric = [
+        "Recency",
+        "Frequency",
+        "Monetary",
+        "Spent",
+        "Income",
+        "Age",
+        "Kidhome",
+        "Teenhome",
+        "family_size",
+        "has_child",
+        "customer_tenure_days",
+        "Avg_Basket",
+        "Deal_Sensitivity",
+        "Online_Intensity",
+        "Variety_Index",
+        "NumWebPurchases",
+        "NumCatalogPurchases",
+        "NumStorePurchases",
+        "Complain",
+    ]
+
+    # 响应相关数值特征（不参与聚类，只在下游预测中用）
+    response_numeric = [
+        "NumDealsPurchases",
+        "NumWebVisitsMonth",
+    ]
+
+    # 类别特征
+    categorical = [
+        "Education",
+        "Marital_Status",
+    ]
+
+    # 过滤掉当前 df 里不存在的列（容错）
+    behavior_numeric = [c for c in behavior_numeric if c in df.columns]
+    response_numeric = [c for c in response_numeric if c in df.columns]
+    categorical = [c for c in categorical if c in df.columns]
+
+    return FeatureConfig(
+        behavior_numeric=behavior_numeric,
+        response_numeric=response_numeric,
+        categorical=categorical,
+    )
 
 
 def assemble_feature_table(
     df: pd.DataFrame,
-    label_col: str = "response",
+    label_col: str = DEFAULT_LABEL_COL,
+    feature_config: FeatureConfig | None = None,
 ) -> Tuple[pd.DataFrame, pd.Series, ColumnTransformer]:
-    """Combine engineered features, scale numerics, and one-hot encode categoricals.
-
-    This is the main entry point for building the modeling-ready feature matrix.
-    It is **backward compatible** with the original implementation, but additionally
-    annotates the returned ColumnTransformer with feature-group metadata so that
-    callers can easily split behavior vs response-related features.
-
-    Parameters
-    ----------
-    df :
-        Raw or cleaned marketing campaign data.
-    label_col :
-        Name of the binary label column (constructed via :func:`add_response_label`).
-
-    Returns
-    -------
-    features_df :
-        Dense feature matrix ready for modeling (rows aligned with ``df``).
-    labels :
-        Binary promotion-response label.
-    transformer :
-        Fitted :class:`~sklearn.compose.ColumnTransformer` that encapsulates numeric
-        scaling and categorical one-hot encoding, with extra attributes:
-
-        - ``behavior_numeric_features_``
-        - ``response_numeric_features_``
-        - ``categorical_features_``
-        - ``categorical_feature_names_``
-        - ``behavior_feature_names_``
-        - ``response_feature_names_``
     """
-    # 1) RFM + structural features
-    engineered = build_rfm_features(df)
-    engineered = add_structural_features(engineered)
+    构造用于聚类 / 下游预测的特征表：
+    - 对金额类特征做 log1p 变换
+    - 数值特征标准化
+    - 类别特征 one-hot
+    返回：
+    - features_df: 所有特征的 DataFrame
+    - labels: 二元响应标签
+    - transformer: sklearn ColumnTransformer，用于后续 split_behavior_and_response_features
+    """
 
-    # 2) Overall promotion-response label
-    engineered = add_response_label(engineered, label_col=label_col)
+    if label_col not in df.columns:
+        raise KeyError(f"Label column '{label_col}' not found. Did you call add_response_label()?")
 
-    # Categorical columns to one-hot encode (intersection with available cols).
-    categorical_cols: List[str] = [
-        col for col in CATEGORICAL_FEATURES if col in engineered.columns
+    work = df.copy()
+
+    # log1p 变换：Income + 所有 Mnt* + Spent/Monetary
+    amount_cols = [
+        "Income",
+        "Monetary",
+        "Spent",
+        "MntWines",
+        "MntFruits",
+        "MntMeatProducts",
+        "MntFishProducts",
+        "MntSweetProducts",
+        "MntGoldProds",
     ]
+    for col in amount_cols:
+        if col in work.columns:
+            work[col] = _log1p_safe(work[col])
 
-    # Numeric behavior vs response-related columns (also intersect with df).
-    behavior_numeric_cols: List[str] = [
-        col for col in BEHAVIOR_NUMERIC_FEATURES if col in engineered.columns
-    ]
-    response_numeric_cols: List[str] = [
-        col for col in RESPONSE_NUMERIC_FEATURES if col in engineered.columns
-    ]
+    # 默认特征配置
+    if feature_config is None:
+        feature_config = _default_feature_config(work)
 
-    # Combined numeric columns for the ColumnTransformer.
-    numeric_cols: List[str] = behavior_numeric_cols + response_numeric_cols
+    numeric_features_all = feature_config.behavior_numeric + feature_config.response_numeric
+    categorical_features = feature_config.categorical
 
-    transformer = ColumnTransformer(
+    # 构造 ColumnTransformer
+    numeric_transformer = StandardScaler()
+    categorical_transformer = OneHotEncoder(
+        sparse_output=False, handle_unknown="ignore"
+    )
+
+    preprocessor = ColumnTransformer(
         transformers=[
-            ("num", StandardScaler(), numeric_cols),
-            ("cat", OneHotEncoder(handle_unknown="ignore"), categorical_cols),
+            ("numeric", numeric_transformer, numeric_features_all),
+            ("categorical", categorical_transformer, categorical_features),
         ],
         remainder="drop",
-        sparse_threshold=0.0,  # always return dense arrays for easier downstream use
     )
 
-    transformed = transformer.fit_transform(engineered)
+    transformed = preprocessor.fit_transform(work)
 
-    # Build human-readable column names for the encoded feature matrix.
-    cat_feature_names: List[str] = []
-    if categorical_cols:
-        cat_encoder = transformer.named_transformers_["cat"]
-        cat_feature_names = list(cat_encoder.get_feature_names_out(categorical_cols))
+    # 生成列名：数值特征 -> 小写；类别特征 -> one-hot 名
+    numeric_feature_names = [col.lower() for col in numeric_features_all]
 
-    feature_names = numeric_cols + cat_feature_names
+    if categorical_features:
+        cat_ohe = preprocessor.named_transformers_["categorical"]
+        cat_feature_names = list(
+            cat_ohe.get_feature_names_out(categorical_features)
+        )
+    else:
+        cat_feature_names = []
 
-    features_df = pd.DataFrame(
-        transformed, columns=feature_names, index=engineered.index
-    )
-    labels = engineered[label_col].astype(int)
+    all_feature_names = numeric_feature_names + cat_feature_names
+    features_df = pd.DataFrame(transformed, columns=all_feature_names, index=df.index)
 
-    # ------------------------------------------------------------------
-    # Enrich the transformer with metadata about feature groups.
-    # ------------------------------------------------------------------
-    behavior_feature_names: List[str] = behavior_numeric_cols + cat_feature_names
-    response_feature_names: List[str] = response_numeric_cols
+    # 记录行为 / 响应 / 类别特征在变换后对应的列名，方便后续 split
+    n_beh = len(feature_config.behavior_numeric)
+    behavior_numeric_names = numeric_feature_names[:n_beh]
+    response_numeric_names = numeric_feature_names[n_beh:]
 
-    transformer.behavior_numeric_features_ = behavior_numeric_cols
-    transformer.response_numeric_features_ = response_numeric_cols
-    transformer.categorical_features_ = categorical_cols
-    transformer.categorical_feature_names_ = cat_feature_names
-    transformer.behavior_feature_names_ = behavior_feature_names
-    transformer.response_feature_names_ = response_feature_names
+    behavior_feature_names = behavior_numeric_names + cat_feature_names
+    response_feature_names = response_numeric_names
 
-    return features_df, labels, transformer
+    # 将这些信息挂在 transformer 上，方便 split_behavior_and_response_features 使用
+    preprocessor.behavior_numeric_features_ = feature_config.behavior_numeric
+    preprocessor.response_numeric_features_ = feature_config.response_numeric
+    preprocessor.categorical_features_ = categorical_features
+
+    preprocessor.behavior_feature_names_ = behavior_feature_names
+    preprocessor.response_feature_names_ = response_feature_names
+
+    # 输出标签
+    labels = work[label_col].astype(int)
+
+    return features_df, labels, preprocessor
 
 
 def split_behavior_and_response_features(
     features_df: pd.DataFrame,
     transformer: ColumnTransformer,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Split a full feature matrix into behavior vs response-related sub-matrices.
-
-    This utility is mainly intended for RAJC-v2 and downstream experiments that
-    want to treat behavior features (for clustering) and response-related features
-    (for prediction) differently, while still reusing the same encoded matrix.
-
-    Parameters
-    ----------
-    features_df :
-        Full encoded feature matrix returned by :func:`assemble_feature_table`.
-    transformer :
-        The fitted ColumnTransformer returned by :func:`assemble_feature_table`.
-
-    Returns
-    -------
-    X_behavior, X_response :
-        Two DataFrames containing behavior features (including all categorical
-        demographics) and response-related features, respectively.
     """
-    # Prefer using metadata attached by assemble_feature_table; if unavailable,
-    # fall back to a simple name-based split.
-    behavior_cols = getattr(transformer, "behavior_feature_names_", None)
-    response_cols = getattr(transformer, "response_feature_names_", None)
+    根据 assemble_feature_table 中挂在 transformer 上的元数据，
+    将特征表拆成：
+    - 行为特征（用于所有聚类 + RAJC）
+    - 响应相关特征（仅用于下游预测）
+    """
+    if not hasattr(transformer, "behavior_feature_names_"):
+        raise AttributeError(
+            "transformer.behavior_feature_names_ not found. "
+            "Please create transformer via assemble_feature_table()."
+        )
 
-    if behavior_cols is None or response_cols is None:
-        # Fallback: treat RESPONSE_NUMERIC_FEATURES as response, others as behavior.
-        response_cols = [c for c in features_df.columns if c in RESPONSE_NUMERIC_FEATURES]
-        behavior_cols = [c for c in features_df.columns if c not in response_cols]
+    behavior_cols = list(transformer.behavior_feature_names_)
+    response_cols = list(transformer.response_feature_names_)
 
-    X_behavior = features_df[behavior_cols].copy()
-    X_response = features_df[response_cols].copy()
+    # 只选取当前 DataFrame 中存在的列，避免因为外部修改导致的 KeyError
+    behavior_cols = [c for c in behavior_cols if c in features_df.columns]
+    response_cols = [c for c in response_cols if c in features_df.columns]
 
-    return X_behavior, X_response
+    behavior_features = features_df[behavior_cols].copy()
+    response_features = features_df[response_cols].copy()
+
+    return behavior_features, response_features

@@ -99,13 +99,14 @@ def _run_rfm_kmeans(
     full_features: pd.DataFrame,
     labels: pd.Series,
 ) -> Dict[str, Any]:
-    """Run Baseline 1: K-Means on RFM features."""
+    """Run Baseline 1: RFM-only K-Means."""
     subset = _select_rfm_features(full_features)
     km_config = KMeansConfig(
         n_clusters=config.get("n_clusters", 4),
         init=config.get("init", "k-means++"),
         max_iter=config.get("max_iter", 300),
         random_state=config.get("random_state", 42),
+        n_init=config.get("n_init", 10),
     )
     model = KMeansBaseline(km_config)
     model.fit(subset)
@@ -118,12 +119,13 @@ def _run_full_kmeans(
     behavior_features: pd.DataFrame,
     labels: pd.Series,
 ) -> Dict[str, Any]:
-    """Run Baseline 2: K-Means on full *behavior* feature set."""
+    """Run Baseline 2: full behavioural-feature K-Means."""
     km_config = KMeansConfig(
         n_clusters=config.get("n_clusters", 4),
         init=config.get("init", "k-means++"),
         max_iter=config.get("max_iter", 300),
         random_state=config.get("random_state", 42),
+        n_init=config.get("n_init", 10),
     )
     model = KMeansBaseline(km_config)
     model.fit(behavior_features)
@@ -138,7 +140,7 @@ def _run_gmm(
 ) -> Dict[str, Any]:
     """Run Baseline 3: Gaussian Mixture Model on behavioral feature set."""
     gmm_config = GMMConfig(
-        n_components=config.get("n_components", 4),
+        n_components=config.get("n_clusters", 4),
         covariance_type=config.get("covariance_type", "full"),
         max_iter=config.get("max_iter", 200),
         random_state=config.get("random_state", 42),
@@ -162,7 +164,8 @@ def _run_cluster_then_predict(
     ctp_config = ClusterThenPredictConfig(
         n_clusters=config.get("n_clusters", 4),
         random_state=config.get("random_state", 42),
-        max_iter=config.get("classifier_params", {}).get("max_iter", 200),
+        max_iter=config.get("max_iter", 200),
+        kmeans_n_init=config.get("kmeans_n_init", 10),
     )
     kmeans, classifiers, assignments = fit_cluster_then_predict(
         full_features, labels, ctp_config
@@ -208,19 +211,16 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
-    """Entry point for running all baseline methods."""
     logger = configure_logging()
     _ensure_output_dirs()
     args = _parse_args(argv)
 
-    # Load configs
+    # Read config
     try:
-        config_text = args.config.read_text()
+        configs = yaml.safe_load(args.config.read_text()) or {}
     except FileNotFoundError:
-        logger.error("Config file not found at %s", args.config)
+        logger.error("Baseline config file not found at %s", args.config)
         sys.exit(1)
-
-    configs = yaml.safe_load(config_text) or {}
 
     # Prepare features
     try:
@@ -233,7 +233,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         )
         sys.exit(1)
 
-    # Behaviour-only features for unsupervised baselines
+    # Behaviour-only subset for clustering-oriented baselines
     behavior_features, _ = split_behavior_and_response_features(
         features_full, transformer
     )
@@ -241,7 +241,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     logger.info(
         "Running baseline methods on %d samples "
         "(behavioural feature dim = %d, full feature dim = %d)",
-        len(features_full),
+        features_full.shape[0],
         behavior_features.shape[1],
         features_full.shape[1],
     )
@@ -264,7 +264,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     if not args.skip_gmm:
         logger.info("Running GMM baseline")
         try:
-            results.append(_run_gmm(configs.get("gmm", {}), behavior_features, labels))
+            results.append(
+                _run_gmm(configs.get("gmm", {}), behavior_features, labels)
+            )
         except Exception as exc:  # pragma: no cover - defensive
             logger.exception("GMM baseline failed: %s", exc)
 
