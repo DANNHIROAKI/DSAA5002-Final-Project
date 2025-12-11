@@ -14,23 +14,14 @@ call-sites tidy, for example::
 from __future__ import annotations
 
 from .logging_utils import DEFAULT_LOG_FORMAT, configure_logging
-from .metrics_utils import (
-    ClusterResponseStats,
-    classification_summary,
-    compute_lift,
-    response_rate_by_cluster,
-    summarize_topk_lift,
-)
+from .metrics_utils import compute_lift, lift_curve
 from .seed_utils import reproducible_numpy_rng, set_global_seed
 
 __all__ = [
     "configure_logging",
     "DEFAULT_LOG_FORMAT",
     "compute_lift",
-    "summarize_topk_lift",
-    "ClusterResponseStats",
-    "response_rate_by_cluster",
-    "classification_summary",
+    "lift_curve",
     "set_global_seed",
     "reproducible_numpy_rng",
 ]

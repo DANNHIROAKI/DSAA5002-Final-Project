@@ -24,21 +24,13 @@ from __future__ import annotations
 from .clustering import compute_scores
 from .prediction import compute_classification_metrics
 from .segmentation import (
-    AllocationResult,
-    campaign_allocation_lift,
     cluster_response_rates,
-    cluster_response_summary,
     response_rate_variance,
-    response_rate_range,
 )
 
 __all__ = [
     "compute_scores",
     "compute_classification_metrics",
     "cluster_response_rates",
-    "cluster_response_summary",
     "response_rate_variance",
-    "response_rate_range",
-    "campaign_allocation_lift",
-    "AllocationResult",
 ]

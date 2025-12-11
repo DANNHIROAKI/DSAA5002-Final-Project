@@ -45,6 +45,43 @@ def add_response_label(
     return labeled
 
 
+# --------- 特征配置（用于 __all__ 暴露） ---------
+
+# 行为 / 响应 / 类别特征常量，供外部模块引用。
+# 这些名称与 `_default_feature_config` 中的默认设置保持一致。
+BEHAVIOR_NUMERIC_FEATURES: List[str] = [
+    "Recency",
+    "Frequency",
+    "Monetary",
+    "Spent",
+    "Income",
+    "Age",
+    "Kidhome",
+    "Teenhome",
+    "family_size",
+    "has_child",
+    "customer_tenure_days",
+    "Avg_Basket",
+    "Deal_Sensitivity",
+    "Online_Intensity",
+    "Variety_Index",
+    "NumWebPurchases",
+    "NumCatalogPurchases",
+    "NumStorePurchases",
+    "Complain",
+]
+
+RESPONSE_NUMERIC_FEATURES: List[str] = [
+    "NumDealsPurchases",
+    "NumWebVisitsMonth",
+]
+
+CATEGORICAL_FEATURES: List[str] = [
+    "Education",
+    "Marital_Status",
+]
+
+
 # --------- 特征工程辅助函数 ---------
 
 
