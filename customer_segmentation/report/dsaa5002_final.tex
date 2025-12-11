@@ -1,9 +1,344 @@
-% Placeholder LaTeX file for the DSAA5002 final report.
+% DSAA5002 Final Project report draft.
 \documentclass{article}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
 \begin{document}
 \title{Response-Aware Joint Clustering for Customer Segmentation}
 \author{DSAA5002 Team}
 \maketitle
+
 \section{Introduction}
-This document will contain the final write-up for the project.
+This document contains the draft write-up for the DSAA5002 final project. It documents our problem formulation, methodology, experiments, and the repository layout used to reproduce results.
+
+\section{Methodology}
+
+\subsection{Problem Formulation}
+\textbf{数据与记号}
+\begin{itemize}
+  \item 数据集：2240 个客户、29 个变量，四类特征（Customer Info / Products / Promotion / Place），对应老师 PPT 第 8 页的数据概览。DSAA\_5002\_project\_tu
+  \item 记号：
+  \begin{itemize}
+    \item $x_i \in \mathbb{R}^d$：第 $i$ 个客户的特征向量；
+    \item $K$：聚类个数；
+    \item $z_i \in \{1,\dots,K\}$：客户 $i$ 的簇标签；
+    \item $\mu_k$：簇 $k$ 的中心。
+  \end{itemize}
+\end{itemize}
+
+\textbf{促销响应标签构造}
+\begin{itemize}
+  \item 原始字段：AcceptedCmp1--5, Response。
+  \item 定义整体响应变量
+  \begin{equation}
+      y_i = \mathbf{1}(\text{客户 } i \text{ 至少接受过一次任何 campaign 或 Response}) ,
+  \end{equation}
+  其中 $y_i \in \{0,1\}$。
+\end{itemize}
+
+\textbf{研究目标} 给定 $\{(x_i,y_i)\}_{i=1}^n$，学习聚类分配 $z_i$，使得：
+\begin{enumerate}
+  \item 簇内行为相似（消费水平、频率等）；
+  \item 簇内促销响应模式尽可能一致，簇间响应率差异尽可能大（方便精准营销）。
+\end{enumerate}
+
+\subsection{Data Preprocessing and Feature Construction}
+
+\subsubsection{原始特征与派生特征}
+\begin{itemize}
+  \item 原始四类字段：
+  \begin{itemize}
+    \item Customer：年龄（由 Year\_Birth 转换）、收入、教育、婚姻、家庭结构、入会时间、投诉等；
+    \item Products：各品类两年消费金额；
+    \item Promotion：历史促销接受情况、折扣购买次数；
+    \item Place：Web / Catalog / Store 购买次数与访问次数。DSAA\_5002\_project\_tu
+  \end{itemize}
+  \item 派生特征：
+  \begin{itemize}
+    \item RFM：Recency（Recency 字段的天数）、Frequency（购买次数总和）、Monetary（消费总额 $\text{Spent} = \sum \text{Mnt*}$）。
+    \item 结构特征：家庭大小、是否有小孩/青少年、教育等级数值化等。
+    \item 渠道偏好：各渠道购买占比等（可选）。
+  \end{itemize}
+\end{itemize}
+
+\subsubsection{数据清洗}
+\begin{itemize}
+  \item 缺失值处理策略（说明是删除还是填补）。
+  \item 年龄、收入等字段的异常值检测：例如利用箱形图或 Z-score 识别极端值（对应 PPT 中 Income 和 Age 存在明显 outlier 的观察）。DSAA\_5002\_project\_tu；删除或 Winsorize 这些 outliers。
+  \item 对数变换或 Box--Cox（如果需要）以缓解长尾分布。
+\end{itemize}
+
+\subsubsection{特征缩放与编码}
+\begin{itemize}
+  \item 数值特征：标准化（zero-mean, unit-variance）。
+  \item 类别特征：One-hot 编码（教育、婚姻等）。
+  \item 所有聚类相关特征组成最终向量 $x_i$。
+\end{itemize}
+
+\subsection{Baseline Methods}
+本小节描述若干对比方法，既包括 PPT 中的默认 K-Means 基线，也包括更强的聚类基线与“先聚类再建模”的两阶段方法。DSAA\_5002\_project\_tu
+
+\subsubsection{Baseline 1：RFM-based K-Means（Default Topic Baseline）}
+\begin{itemize}
+  \item 特征：仅使用 RFM 三个维度（或 RFM + 总消费），和原始 Kaggle notebook/PPT 流程保持同级。DSAA\_5002\_project\_tu
+  \item 目标函数：
+  \begin{equation}
+  \min_{\{\mu_k\},\{z_i\}} \sum_{i=1}^n \big\|x_i - \mu_{z_i}\big\|^2.
+  \end{equation}
+  \item 聚类个数选择：采用 Elbow method/Silhouette score，对 $K\in\{2,\dots,10\}$ 进行网格搜索；主实验中固定 $K$（如 4）便于与默认题结论对比。
+  \item 实现细节：初始化 k-means++，迭代次数、停止条件、随机种子等。
+\end{itemize}
+
+\subsubsection{Baseline 2：Full-feature K-Means}
+\begin{itemize}
+  \item 特征：使用 RFM + 产品消费金额 + 渠道使用 + 主要人口属性（剔除与响应严重共线的字段可在 Preliminary 说明）。
+  \item 动机：检验简单的“多特征 K-Means”是否已经能形成更清晰的业务分群。
+  \item 与 Baseline 1 的区别：目标函数相同，但特征空间更高维，聚类结果可能有更细的行为区分。
+\end{itemize}
+
+\subsubsection{Baseline 3：Gaussian Mixture Model (GMM)}
+\begin{itemize}
+  \item 模型假设：客户特征来自 $K$ 个高斯分布的混合：
+  \begin{equation}
+    p(x_i) = \sum_{k=1}^K \pi_k \mathcal{N}(x_i \mid \mu_k, \Sigma_k).
+  \end{equation}
+  \item 优化方法：EM 算法估计 $\pi_k, \mu_k, \Sigma_k$，后验最大概率 $z_i = \arg\max_k p(z_i=k\mid x_i)$ 作为簇标签。
+  \item 理由：相比 K-Means 只使用欧氏距离，GMM 更柔性，允许簇形状非球形、方差不等。
+\end{itemize}
+
+\subsubsection{Baseline 4：Two-stage ``Cluster-then-Predict''}
+\begin{itemize}
+  \item 步骤 1：行为聚类：用 Baseline 2 的 Full-feature K-Means 得到簇标签 $z_i^{\text{KM}}$。
+  \item 步骤 2：簇内促销预测模型：对每个簇单独训练一个逻辑回归预测 $y_i$，$p(y_i=1\mid x_i, z_i^{\text{KM}}=k) = \sigma(w_k^\top x_i + b_k)$。
+  \item 对比动机：与后续“联合学习聚类 + 响应”方法对比，观察“先聚类再预测”带来的局限。
+\end{itemize}
+
+\subsection{Proposed Method: Response-Aware Joint Clustering (RAJC)}
+
+\subsubsection{Motivation}
+传统聚类（Baselines 1--3）只利用 $x_i$ 行为特征，对促销响应 $y_i$ 完全忽略：得到的簇在消费行为上相似，但不保证在响应模式上有差异；事后再看 AcceptedCmp* 只是一种解释，并不会反过来影响分群结果。DSAA\_5002\_project\_tu 希望在聚类阶段强制同簇用户不仅行为相似，而且促销响应相似，从而得到真正可用于 campaign 定向投放的 segment。
+
+\subsubsection{Joint Objective: Clustering + Promotion Response}
+为每个簇 $k$ 引入一个局部的逻辑回归参数 $(w_k,b_k)$ 预测 $y_i$：
+\begin{equation}
+  p(y_i=1\mid x_i, z_i=k) = \sigma(w_k^\top x_i + b_k).
+\end{equation}
+逻辑回归损失（交叉熵）：
+\begin{equation}
+  \ell_{\text{log}}(x_i,y_i; w_{z_i},b_{z_i}) = -y_i\log p_i - (1-y_i)\log(1-p_i).
+\end{equation}
+联合目标函数为
+\begin{equation}
+  L(\{\mu_k\},\{w_k,b_k\},\{z_i\}) = \sum_{i=1}^n \big\|x_i - \mu_{z_i}\big\|^2 + \lambda \sum_{i=1}^n \ell_{\text{log}}(x_i,y_i; w_{z_i},b_{z_i}),
+\end{equation}
+其中第一项保证行为相似，第二项保证响应模式一致，$\lambda>0$ 为权衡超参数，$\lambda=0$ 时退化为标准 K-Means。
+
+\subsubsection{Alternating Optimization Algorithm}
+\begin{itemize}
+  \item 初始化：用 Baseline 2 的 Full-feature K-Means 得到初始簇 $z_i^{(0)}$ 与 $\mu_k^{(0)}$，并在每个簇上训练一个逻辑回归得到 $w_k^{(0)}, b_k^{(0)}$。
+  \item E-step：给定当前 $\mu_k, w_k, b_k$，对每个样本与簇计算代价
+  \begin{equation}
+    \text{cost}_{ik} = \big\|x_i - \mu_k\big\|^2 + \lambda\,\ell_{\text{log}}(x_i,y_i;w_k,b_k),
+  \end{equation}
+  并令 $z_i \leftarrow \arg\min_k \text{cost}_{ik}$。
+  \item M-step：给定新簇分配 $z_i$，更新簇中心 $\mu_k \leftarrow \frac{1}{|C_k|} \sum_{i:z_i=k} x_i$，在簇内样本上拟合带 L2 正则的逻辑回归得到新的 $w_k,b_k$。
+  \item 迭代与停止：重复 E/M-step 直到目标函数变化小于阈值或达到最大迭代次数（如 20）。
+\end{itemize}
+
+\subsubsection{Regularization and Hyper-parameters}
+\begin{itemize}
+  \item $\lambda$ 的选择：在验证集上扫描若干候选值（如 $\{0,0.1,1,10\}$），选择兼顾 Silhouette score 和簇间响应率差异的值。
+  \item 逻辑回归的正则化系数 $C$ 或 $\alpha$；
+  \item 聚类个数 $K$ 与 Baseline 保持一致（主实验取 4），额外实验检验鲁棒性。
+\end{itemize}
+
+\subsubsection{Theoretical Property (Optional)}
+在 E-step 与 M-step 中，每一步都会使联合目标函数 $L$ 非增，因此算法在有限步内收敛到一个局部最优解：E-step 固定簇参数时选择最小代价的簇不会增大 $L$；M-step 固定簇分配时更新均值与逻辑回归参数分别最小化对应项也不会增大 $L$；且 $L \ge 0$，因此序列收敛。
+
+\subsection{Implementation Details}
+\begin{itemize}
+  \item 软件环境：Python，\texttt{scikit-learn}，\texttt{numpy}，\texttt{pandas} 等。
+  \item 训练/验证划分：虽然整体任务是无监督聚类，但 RAJC 利用了 $y_i$ 作为弱监督信号，可将数据随机划分为 train/validation，用于选择 $\lambda$ 等超参数。
+  \item 不平衡处理：促销响应样本较少时，在逻辑回归中使用 \texttt{class\_weight} 或过采样。
+  \item 可复现性：统一随机种子、记录主要超参数设置。
+\end{itemize}
+
+\section{Experiments}
+
+\subsection{Experimental Setup}
+
+\subsubsection{Research Questions}
+设定 3--4 个核心研究问题（RQ）方便后续小节对应：
+\begin{itemize}
+  \item RQ1：在聚类质量（紧凑性、分离度）上，RAJC 与传统聚类方法相比表现如何？
+  \item RQ2：RAJC 是否能显著放大簇间的促销响应差异，从而得到更有营销价值的分群？
+  \item RQ3：把聚类结果作为特征加入下游“促销响应预测”任务时，RAJC 是否比 Baseline 的簇更有预测价值？
+  \item RQ4：RAJC 对超参数（尤其是 $\lambda$ 和 $K$）是否稳健？其性能提升是否稳定可复现？
+\end{itemize}
+
+\subsubsection{Dataset and Preprocessing}
+\begin{itemize}
+  \item 数据：Kaggle \textit{Customer Personality Analysis}，2240 customers, 29 attributes，分为 Customer / Products / Promotion / Place 四类。DSAA\_5002\_project\_tu
+  \item 预处理与特征工程：缺失值处理、异常值删除（Income / Age 的 outliers 处理，呼应 PPT），RFM、家庭结构、渠道偏好等派生特征。
+  \item 统一特征集合：实验主流程使用 Full-feature 版本，RFM-only 仅在 Baseline 1 中使用。
+\end{itemize}
+
+\subsubsection{Compared Methods}
+列出所有方法（详细定义已在 Method 章）：
+\begin{enumerate}
+  \item B1 -- RFM-KMeans：仅使用 RFM 特征、标准 K-Means（对应默认题基线）。DSAA\_5002\_project\_tu
+  \item B2 -- Full-KMeans：使用完整 feature set 的 K-Means。
+  \item B3 -- GMM：Gaussian Mixture Model，EM 估计，后验最大簇分配。
+  \item B4 -- Cluster-then-Predict：先用 Full-KMeans 聚类，再在每个簇内训练局部逻辑回归预测 $y_i$。
+  \item Ours -- RAJC：联合最小化聚类误差与促销响应损失的 Response-Aware Joint Clustering。
+\end{enumerate}
+
+\subsubsection{Evaluation Metrics}
+\begin{enumerate}
+  \item Clustering Quality（无监督指标）：Silhouette Score、Calinski--Harabasz Index、Davies--Bouldin Index。
+  \item Promotion Response Segmentation（业务指标）：每簇促销响应率 $\hat{p}_k$；簇间响应率方差/最大-最小差 $\mathrm{Var}(\{\hat{p}_k\})$, $\max_k \hat{p}_k - \min_k \hat{p}_k$；Overall Lift：高响应簇 vs 全体平均响应率的提升比例。
+  \item Downstream Prediction Metrics：在预测 $y_i$ 的任务上使用 AUC, F1, Log-loss。
+  \item Stability \& Efficiency（可选）：不同随机种子的 NMI/ARI，训练时间对比。
+\end{enumerate}
+
+\subsubsection{Implementation Details}
+\begin{itemize}
+  \item 软件：Python 3.x, \texttt{scikit-learn}, \texttt{numpy}, \texttt{pandas} 等。
+  \item 硬件：CPU/内存配置简单说明。
+  \item 超参数：聚类数 $K$ 主实验固定为 4（与默认题一致），附录展示其它 $K$ 结果。DSAA\_5002\_project\_tu；RAJC 的 $\lambda$ 候选集合（如 $\{0,0.1,1,10\}$）以及 Logistic Regression 的正则系数。
+  \item 为减小随机性：每个方法在 10 个不同随机种子上运行，报告平均值 ± 标准差。
+\end{itemize}
+
+\subsection{Overall Clustering Performance (RQ1)}
+目标：比较 RAJC 与各 Baseline 在聚类质量指标上的表现，确保引入监督信号后聚类本身不崩。
+\begin{itemize}
+  \item 实验设计：在统一的 feature set 和 $K$ 下分别运行 B1--B4 与 RAJC，记录 Silhouette/CH/DB index。
+  \item 结果展示：Table 1 报告三项指标的均值 ± 标准差，Figure 3（可选）展示 PCA 或 t-SNE 的簇分布对比。
+  \item 结论要点：RAJC 的聚类紧凑性和分离度与 Full-KMeans 至少相当，甚至略好，说明在不牺牲传统聚类质量的前提下引入了 outcome awareness。
+\end{itemize}
+
+\subsection{Promotion Response Segmentation Analysis (RQ2)}
+核心：证明 RAJC 簇间促销响应差异更大、更有营销可解释性。
+\begin{itemize}
+  \item 实验 1：簇级响应率对比，对每个方法、每个簇计算 $\hat{p}_k$，并计算方差与最大-最小差；Table 2 对比各方法簇间响应率分布及其方差/Range。
+  \item 实验 2：响应率可视化，Figure 4 为各方法的簇响应率条形图，对比 Baseline K-Means 与 RAJC 的“高响应簇”差异。
+  \item 实验 3：促销资源分配模拟（可选），设定预算覆盖 Top-$q$\% 客户（如 20\%），基于簇响应率排序选取客户并计算预期总响应数；Table 3 汇报 lift。
+  \item 结论：RAJC 提供的 segment 更适合做 high-value targeting，在同等预算下基于 RAJC 分群的营销策略可以获得更高预期响应。
+\end{itemize}
+
+\subsection{Downstream Promotion-Response Prediction (RQ3)}
+目的：检验“簇标签作为特征”的预测价值。
+\begin{itemize}
+  \item 设置：二分类任务预测 $y_i$，统一使用 Logistic Regression 或 Random Forest，按 80/20 划分或 5-fold CV。
+  \item 特征方案：
+  \begin{enumerate}
+    \item Base：仅使用原始特征 $x_i$。
+    \item Base + KMeansID：$x_i$ + Full-KMeans 的簇 One-hot。
+    \item Base + GMMID：$x_i$ + GMM 的簇 One-hot。
+    \item Base + RAJCID：$x_i$ + RAJC 的簇 One-hot。
+  \end{enumerate}
+  \item 结果展示：Table 4 汇报 AUC/F1/Log-loss，可加统计显著性标记。
+  \item 结论：若“Base + RAJCID”明显优于 “Base + KMeansID”，说明 RAJC 提供的簇包含更多与 $y_i$ 相关的信息。
+\end{itemize}
+
+\subsection{Ablation Study on $\lambda$ and Model Variants (RQ4)}
+\subsubsection{Effect of $\lambda$ (Trade-off between Clustering and Response)}
+固定 $K$ 和其它设置，改变 $\lambda \in \{0,0.1,1,10\}$。记录聚类质量指标、簇间响应率方差、下游预测 AUC。Figure 5 展示随 $\lambda$ 变化的指标曲线。解读：$\lambda=0$ 等于 Full-KMeans；随 $\lambda$ 增大，簇间响应差异与下游 AUC 提升，但过大可能损害聚类质量，找到 Pareto-like sweet spot。
+
+\subsubsection{Model Variants}
+\begin{itemize}
+  \item Variant A：共享逻辑回归，所有簇共享一个全局 $w,b$（而非 per-cluster），对比 per-cluster classifier 的增益。
+  \item Variant B：只用少量特征进行响应建模，例如只用 RFM + Promotion 特征做逻辑回归，观察影响。
+  \item Table 5：各变体在关键指标（簇间响应差异、下游 AUC）上的对比，说明设计选择（per-cluster classifier + full feature set）的价值。
+\end{itemize}
+
+\subsection{Robustness and Sensitivity Analysis}
+\begin{itemize}
+  \item Sensitivity to Number of Clusters $K$：令 $K\in\{3,4,5,6\}$，对 Full-KMeans 与 RAJC 实验，关注聚类质量与簇间响应差异随 $K$ 变化；Figure 6 展示曲线。
+  \item Stability across Random Seeds：对 RAJC 在 10 个随机种子下运行，计算两两聚类结果之间的 NMI/ARI 并报告平均稳定性，说明非凸优化仍具有可接受稳定性。
+\end{itemize}
+
+\subsection{Qualitative Analysis and Case Study}
+借鉴默认题的 Profiling 部分，通过可视化和文字对簇做“人群画像”。DSAA\_5002\_project\_tu
+\begin{itemize}
+  \item Cluster Profiles under RAJC：对高响应簇/低响应簇绘制 Income vs Spent、Age vs Spent、Children vs Spent 等 KDE 或箱线图，列出各品类消费、渠道使用平均水平，对比默认题中四个簇的描述。
+  \item Comparison with Baseline Segmentation：选取典型客户群，展示在 RFM-KMeans 下为同一簇但在 RAJC 下被拆分为“高响应”和“低响应”，解释这种拆分的营销价值。
+  \item Actionable Marketing Insights：为每个 RAJC 簇给出一句营销建议，高响应簇适合频繁 campaign，低响应但高消费簇适合 loyalty program，低消费低响应簇不宜投入过多资源等。
+\end{itemize}
+
+\section{Repository Layout}
+项目代码结构如下：
+\begin{verbatim}
+customer_segmentation/
+│
+├─ README.md
+├─ requirements.txt
+│
+├─ data/
+│   ├─ raw/
+│   │   └─ marketing_campaign.csv       # 原始数据（你已经上传的）
+│   └─ processed/
+│       ├─ processed_features.csv      # 预处理+特征工程后的表
+│       └─ train_test_split.pkl        # 可选：缓存划分结果
+│
+├─ configs/
+│   ├─ baselines.yaml                  # 各 baseline 的超参数
+│   └─ rajc.yaml                       # 我们 RAJC 模型的超参数
+│
+├─ src/
+│   ├─ __init__.py
+│   │
+│   ├─ data/
+│   │   ├─ __init__.py
+│   │   ├─ load.py                     # 读入原始数据
+│   │   ├─ preprocess.py               # 缺失值、异常值处理等
+│   │   └─ features.py                 # RFM、家庭结构等特征工程
+│   │
+│   ├─ models/
+│   │   ├─ __init__.py
+│   │   ├─ kmeans_baseline.py          # Baseline 1 & 2 (RFM/Full KMeans)
+│   │   ├─ gmm_baseline.py             # Baseline 3 (GMM)
+│   │   ├─ cluster_then_predict.py     # Baseline 4 ("Cluster-then-Predict")
+│   │   └─ rajc.py                     # 我们提出的 RAJC 联合聚类模型
+│   │
+│   ├─ evaluation/
+│   │   ├─ __init__.py
+│   │   ├─ clustering.py               # Silhouette / CH / DB 指标
+│   │   ├─ segmentation.py             # 各簇响应率、方差、lift 等
+│   │   └─ prediction.py               # 下游 Response 预测的 AUC / F1 等
+│   │
+│   ├─ visualization/
+│   │   ├─ __init__.py
+│   │   ├─ plots_clustering.py         # 降维后簇分布、Elbow 图等
+│   │   └─ plots_profiles.py           # 各簇画像：Income vs Spent 等
+│   │
+│   ├─ experiments/
+│   │   ├─ __init__.py
+│   │   ├─ run_baselines.py            # 跑所有 baseline + 保存结果
+│   │   ├─ run_rajc.py                 # 训练 & 评估 RAJC 的主程序
+│   │   ├─ run_ablation.py             # λ / K 等消融实验
+│   │   └─ run_downstream.py           # 下游 Response 预测实验
+│   │
+│   └─ utils/
+│       ├─ __init__.py
+│       ├─ logging_utils.py            # 日志、打印格式
+│       ├─ seed_utils.py               # 固定随机种子
+│       └─ metrics_utils.py            # 计算 lift 等通用工具
+│
+├─ notebooks/
+│   ├─ 01_eda.ipynb                    # 初步 EDA（方便写报告的图）
+│   └─ 02_debug_prototype.ipynb        # 原型调试用，不进最终 pipeline
+│
+├─ outputs/
+│   ├─ logs/                           # 训练 & 实验日志
+│   ├─ figures/                        # 所有图（聚类、画像、ablation 曲线）
+│   ├─ tables/                         # 实验结果表（csv/tex）
+│   └─ models/                         # 保存训练好的 RAJC 模型参数
+│
+└─ report/
+    ├─ dsaa5002_final.tex              # KDD 模板的主 tex（或 .docx）
+    └─ figures/                        # 报告里用到的最终图
+\end{verbatim}
+
 \end{document}
