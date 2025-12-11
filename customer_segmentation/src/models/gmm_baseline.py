@@ -29,6 +29,7 @@ class GMMBaseline:
         self.model: Optional[GaussianMixture] = None
 
     def fit(self, features: pd.DataFrame) -> "GMMBaseline":
+        """Fit a Gaussian Mixture Model on the given feature matrix."""
         self.model = GaussianMixture(
             n_components=self.config.n_components,
             covariance_type=self.config.covariance_type,
@@ -39,26 +40,32 @@ class GMMBaseline:
         return self
 
     def predict(self, features: pd.DataFrame) -> pd.Series:
+        """Assign each sample to the most likely Gaussian component."""
         if self.model is None:
             raise ValueError("Model has not been fitted yet.")
         labels = self.model.predict(features)
         return pd.Series(labels, index=features.index, name="cluster")
 
     def silhouette(self, features: pd.DataFrame) -> float:
+        """Silhouette score for current GMM clustering (nan if undefined)."""
         if self.model is None:
             raise ValueError("Model has not been fitted yet.")
         labels = self.model.predict(features)
-        if len(np.unique(labels)) < 2:
+        unique = np.unique(labels)
+        if len(unique) < 2 or features.shape[0] <= len(unique):
             return float("nan")
         return float(silhouette_score(features, labels))
 
 
 def run_gmm(
-    features: pd.DataFrame, n_components: int = 4, random_state: int = 42
+    features: pd.DataFrame,
+    n_components: int = 4,
+    random_state: int = 42,
 ) -> Tuple[GMMBaseline, pd.Series]:
     """Fit a GMM and return the model plus assignments."""
-
-    baseline = GMMBaseline(GMMConfig(n_components=n_components, random_state=random_state))
+    baseline = GMMBaseline(
+        GMMConfig(n_components=n_components, random_state=random_state)
+    )
     baseline.fit(features)
     labels = baseline.predict(features)
     return baseline, labels

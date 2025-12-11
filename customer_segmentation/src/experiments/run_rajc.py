@@ -1,9 +1,11 @@
 """Train and evaluate the Response-Aware Joint Clustering (RAJC) model."""
+
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 import sys
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Any, Sequence, Optional
 
 import pandas as pd
 import yaml
@@ -21,40 +23,70 @@ from customer_segmentation.src.utils.metrics_utils import compute_lift
 OUTPUT_DIR = Path("customer_segmentation/outputs")
 TABLE_DIR = OUTPUT_DIR / "tables"
 
+DEFAULT_CONFIG_PATH = Path("customer_segmentation/configs/rajc.yaml")
+
 
 def _ensure_output_dirs() -> None:
     TABLE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _prepare_features() -> Tuple[pd.DataFrame, pd.Series]:
+    """Load, clean and featurize the dataset."""
     raw = load_raw_data(parse_dates=["Dt_Customer"])
     cleaned = clean_data(raw)
     features_df, labels, _ = assemble_feature_table(cleaned)
     return features_df, labels
 
 
-def _evaluate(model: RAJCModel, features: pd.DataFrame, labels: pd.Series) -> Dict:
+def _evaluate(model: RAJCModel, features: pd.DataFrame, labels: pd.Series) -> Dict[str, Any]:
+    """Compute clustering, segmentation and prediction metrics for a fitted RAJC model."""
     clusters = model.assignments_
     if clusters is None:
-        raise ValueError("RAJC model has not been fitted.")
+        raise ValueError("RAJC model has not been fitted or assignments_ is None.")
 
+    # Clustering + segmentation metrics
     scores = clustering_eval.compute_scores(features, clusters)
     rates = segmentation_eval.cluster_response_rates(clusters, labels)
     scores["response_rate_variance"] = segmentation_eval.response_rate_variance(rates)
     scores["response_rates"] = rates.to_dict()
 
+    # Promotion-response prediction metrics (using RAJC's per-cluster classifiers)
     probas = model.predict_response(features)
     preds = (probas >= 0.5).astype(int)
-    scores.update(prediction_eval.compute_classification_metrics(labels, preds, probas))
+    scores.update(
+        prediction_eval.compute_classification_metrics(labels, preds, probas)
+    )
     scores["lift_top20"] = compute_lift(labels, probas, top_frac=0.2)
+    scores["label"] = "rajc"
+
     return scores
 
 
-def main() -> None:
+def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Train and evaluate the RAJC model on the marketing dataset."
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_CONFIG_PATH,
+        help=f"YAML configuration file for RAJC (default: {DEFAULT_CONFIG_PATH})",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[Sequence[str]] = None) -> None:
     logger = configure_logging()
     _ensure_output_dirs()
+    args = _parse_args(argv)
 
-    config_dict = yaml.safe_load(Path("customer_segmentation/configs/rajc.yaml").read_text())
+    # Load configuration
+    try:
+        config_dict = yaml.safe_load(args.config.read_text()) or {}
+    except FileNotFoundError:
+        logger.error("RAJC config file not found at %s", args.config)
+        sys.exit(1)
+
     rajc_cfg = config_dict.get("rajc", {})
     config = RAJCConfig(
         n_clusters=rajc_cfg.get("n_clusters", 4),
@@ -65,18 +97,28 @@ def main() -> None:
         logreg_max_iter=rajc_cfg.get("logistic_regression", {}).get("max_iter", 200),
     )
 
+    # Prepare data
     try:
         features, labels = _prepare_features()
     except FileNotFoundError as exc:
         logger.error("%s", exc)
         logger.error(
-            "Run `python -m customer_segmentation.src.data.check_data` to verify dataset placement."
+            "Run `python -m customer_segmentation.src.data.check_data` "
+            "to verify dataset placement."
         )
         sys.exit(1)
-    logger.info("Fitting RAJC on %d samples", len(features))
 
+    logger.info(
+        "Fitting RAJC on %d samples with config: %s",
+        len(features),
+        config,
+    )
+
+    # Fit RAJC
     model = RAJCModel(config)
     model.fit(features, labels)
+
+    # Evaluate
     metrics = _evaluate(model, features, labels)
 
     metrics_df = pd.DataFrame([metrics])
@@ -85,7 +127,9 @@ def main() -> None:
     logger.info("Saved RAJC metrics to %s", metrics_path)
 
     assignments_path = TABLE_DIR / "rajc_assignments.csv"
-    model.assignments_.to_csv(assignments_path, header=["cluster"])
+    pd.Series(model.assignments_, index=features.index, name="cluster").to_csv(
+        assignments_path, header=True
+    )
     logger.info("Saved RAJC assignments to %s", assignments_path)
 
 

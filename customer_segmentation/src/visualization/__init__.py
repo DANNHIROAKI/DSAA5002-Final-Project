@@ -1,4 +1,11 @@
-"""Plotting utilities for clustering evaluation and customer profiling."""
+"""Plotting utilities for clustering evaluation and customer profiling.
+
+This subpackage groups plotting helpers used throughout the experiments and
+the report (e.g., elbow curves, PCA/t-SNE visualizations, and cluster
+profiles such as income-vs-spending plots and channel mix charts).
+"""
+
+from __future__ import annotations
 
 from .plots_clustering import (
     plot_cluster_centers,

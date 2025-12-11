@@ -8,11 +8,13 @@ This script executes the baseline methods described in the methodology:
 
 Outputs are written under ``customer_segmentation/outputs`` for later reporting.
 """
+
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 import sys
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Any, Sequence, Optional
 
 import pandas as pd
 import yaml
@@ -33,18 +35,21 @@ from customer_segmentation.src.models.kmeans_baseline import KMeansBaseline, KMe
 from customer_segmentation.src.utils.logging_utils import configure_logging
 from customer_segmentation.src.utils.metrics_utils import compute_lift
 
-
 OUTPUT_DIR = Path("customer_segmentation/outputs")
 TABLE_DIR = OUTPUT_DIR / "tables"
 FIG_DIR = OUTPUT_DIR / "figures"
 
+DEFAULT_CONFIG_PATH = Path("customer_segmentation/configs/baselines.yaml")
+
 
 def _ensure_output_dirs() -> None:
+    """Create output directories if they do not exist."""
     TABLE_DIR.mkdir(parents=True, exist_ok=True)
     FIG_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _prepare_features() -> Tuple[pd.DataFrame, pd.Series]:
+    """Load raw data, clean it, and build the engineered feature matrix."""
     raw = load_raw_data(parse_dates=["Dt_Customer"])
     cleaned = clean_data(raw)
     features_df, labels, _ = assemble_feature_table(cleaned)
@@ -52,6 +57,7 @@ def _prepare_features() -> Tuple[pd.DataFrame, pd.Series]:
 
 
 def _select_rfm_features(features: pd.DataFrame) -> pd.DataFrame:
+    """Select the RFM subset of engineered features for Baseline 1."""
     cols = [col for col in ["recency", "frequency", "monetary"] if col in features.columns]
     if not cols:
         raise ValueError("RFM columns are missing from engineered features.")
@@ -59,60 +65,70 @@ def _select_rfm_features(features: pd.DataFrame) -> pd.DataFrame:
 
 
 def _evaluate_clusters(
-    name: str, feature_matrix: pd.DataFrame, cluster_labels: pd.Series, responses: pd.Series
-) -> Dict:
+    name: str,
+    feature_matrix: pd.DataFrame,
+    cluster_labels: pd.Series,
+    responses: pd.Series,
+) -> Dict[str, Any]:
+    """Compute clustering and segmentation metrics for a given partition."""
     scores = clustering_eval.compute_scores(feature_matrix, cluster_labels)
     rates = segmentation_eval.cluster_response_rates(cluster_labels, responses)
+
     scores["response_rate_variance"] = segmentation_eval.response_rate_variance(rates)
     scores["response_rates"] = rates.to_dict()
     scores["label"] = name
     return scores
 
 
-def _run_rfm_kmeans(config: dict, features: pd.DataFrame, labels: pd.Series) -> Dict:
+def _run_rfm_kmeans(config: dict, features: pd.DataFrame, labels: pd.Series) -> Dict[str, Any]:
+    """Run Baseline 1: K-Means on RFM features."""
     subset = _select_rfm_features(features)
-    model = KMeansBaseline(
-        KMeansConfig(
-            n_clusters=config.get("n_clusters", 4),
-            init=config.get("init", "k-means++"),
-            max_iter=config.get("max_iter", 300),
-            random_state=config.get("random_state", 42),
-        )
+    km_config = KMeansConfig(
+        n_clusters=config.get("n_clusters", 4),
+        init=config.get("init", "k-means++"),
+        max_iter=config.get("max_iter", 300),
+        random_state=config.get("random_state", 42),
     )
+    model = KMeansBaseline(km_config)
     model.fit(subset)
     assignments = model.predict(subset)
     return _evaluate_clusters("rfm_kmeans", subset, assignments, labels)
 
 
-def _run_full_kmeans(config: dict, features: pd.DataFrame, labels: pd.Series) -> Dict:
-    model = KMeansBaseline(
-        KMeansConfig(
-            n_clusters=config.get("n_clusters", 4),
-            init=config.get("init", "k-means++"),
-            max_iter=config.get("max_iter", 300),
-            random_state=config.get("random_state", 42),
-        )
+def _run_full_kmeans(config: dict, features: pd.DataFrame, labels: pd.Series) -> Dict[str, Any]:
+    """Run Baseline 2: K-Means on full feature set."""
+    km_config = KMeansConfig(
+        n_clusters=config.get("n_clusters", 4),
+        init=config.get("init", "k-means++"),
+        max_iter=config.get("max_iter", 300),
+        random_state=config.get("random_state", 42),
     )
+    model = KMeansBaseline(km_config)
     model.fit(features)
     assignments = model.predict(features)
     return _evaluate_clusters("full_kmeans", features, assignments, labels)
 
 
-def _run_gmm(config: dict, features: pd.DataFrame, labels: pd.Series) -> Dict:
-    model = GMMBaseline(
-        GMMConfig(
-            n_components=config.get("n_components", 4),
-            covariance_type=config.get("covariance_type", "full"),
-            max_iter=config.get("max_iter", 200),
-            random_state=config.get("random_state", 42),
-        )
+def _run_gmm(config: dict, features: pd.DataFrame, labels: pd.Series) -> Dict[str, Any]:
+    """Run Baseline 3: Gaussian Mixture Model on full feature set."""
+    gmm_config = GMMConfig(
+        n_components=config.get("n_components", 4),
+        covariance_type=config.get("covariance_type", "full"),
+        max_iter=config.get("max_iter", 200),
+        random_state=config.get("random_state", 42),
     )
+    model = GMMBaseline(gmm_config)
     model.fit(features)
     assignments = model.predict(features)
     return _evaluate_clusters("gmm", features, assignments, labels)
 
 
-def _run_cluster_then_predict(config: dict, features: pd.DataFrame, labels: pd.Series) -> Dict:
+def _run_cluster_then_predict(
+    config: dict,
+    features: pd.DataFrame,
+    labels: pd.Series,
+) -> Dict[str, Any]:
+    """Run Baseline 4: cluster-then-predict pipeline."""
     ctp_config = ClusterThenPredictConfig(
         n_clusters=config.get("n_clusters", 4),
         random_state=config.get("random_state", 42),
@@ -121,38 +137,97 @@ def _run_cluster_then_predict(config: dict, features: pd.DataFrame, labels: pd.S
     kmeans, classifiers, assignments = fit_cluster_then_predict(features, labels, ctp_config)
     probas, preds = predict_with_clusters(assignments, features, classifiers)
 
-    metrics = prediction_eval.compute_classification_metrics(labels, preds, probas)
-    metrics.update(
-        _evaluate_clusters("cluster_then_predict", features, assignments, labels)
+    # Classification metrics
+    clf_metrics = prediction_eval.compute_classification_metrics(labels, preds, probas)
+    # Clustering + segmentation metrics
+    cluster_metrics = _evaluate_clusters("cluster_then_predict", features, assignments, labels)
+
+    # Merge dictionaries (cluster metrics already contain "label").
+    cluster_metrics.update(clf_metrics)
+    cluster_metrics["inertia"] = float(kmeans.inertia_)
+    cluster_metrics["lift_top20"] = compute_lift(labels, probas, top_frac=0.2)
+    return cluster_metrics
+
+
+def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    """Parse command-line arguments for baseline experiments."""
+    parser = argparse.ArgumentParser(
+        description="Run baseline clustering methods for DSAA5002 final project."
     )
-    metrics["inertia"] = kmeans.inertia()
-    metrics["lift_top20"] = compute_lift(labels, probas, top_frac=0.2)
-    return metrics
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_CONFIG_PATH,
+        help=f"YAML config for baselines (default: {DEFAULT_CONFIG_PATH})",
+    )
+    parser.add_argument(
+        "--skip-gmm",
+        action="store_true",
+        help="Skip the GMM baseline (useful when runtime is a concern).",
+    )
+    parser.add_argument(
+        "--skip-ctp",
+        action="store_true",
+        help="Skip the Cluster-then-Predict baseline.",
+    )
+    return parser.parse_args(argv)
 
 
-def main() -> None:
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    """Entry point for running all baseline methods."""
     logger = configure_logging()
     _ensure_output_dirs()
+    args = _parse_args(argv)
 
-    configs = yaml.safe_load(Path("customer_segmentation/configs/baselines.yaml").read_text())
+    # Load configs
+    try:
+        config_text = args.config.read_text()
+    except FileNotFoundError:
+        logger.error("Config file not found at %s", args.config)
+        sys.exit(1)
+
+    configs = yaml.safe_load(config_text) or {}
+
+    # Prepare features
     try:
         features, labels = _prepare_features()
     except FileNotFoundError as exc:
         logger.error("%s", exc)
         logger.error(
-            "Run `python -m customer_segmentation.src.data.check_data` to verify dataset placement."
+            "Run `python -m customer_segmentation.src.data.check_data` "
+            "to verify dataset placement."
         )
         sys.exit(1)
 
     logger.info("Running baseline methods on %d samples", len(features))
 
-    results = []
+    results: list[Dict[str, Any]] = []
+
+    # Baseline 1: RFM K-Means
+    logger.info("Running RFM K-Means baseline")
     results.append(_run_rfm_kmeans(configs.get("rfm_kmeans", {}), features, labels))
+
+    # Baseline 2: Full-feature K-Means
+    logger.info("Running Full-feature K-Means baseline")
     results.append(_run_full_kmeans(configs.get("full_kmeans", {}), features, labels))
-    results.append(_run_gmm(configs.get("gmm", {}), features, labels))
-    results.append(
-        _run_cluster_then_predict(configs.get("cluster_then_predict", {}), features, labels)
-    )
+
+    # Baseline 3: GMM
+    if not args.skip_gmm:
+        logger.info("Running GMM baseline")
+        try:
+            results.append(_run_gmm(configs.get("gmm", {}), features, labels))
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception("GMM baseline failed: %s", exc)
+
+    # Baseline 4: Cluster-then-Predict
+    if not args.skip_ctp:
+        logger.info("Running Cluster-then-Predict baseline")
+        try:
+            results.append(
+                _run_cluster_then_predict(configs.get("cluster_then_predict", {}), features, labels)
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception("Cluster-then-Predict baseline failed: %s", exc)
 
     results_df = pd.DataFrame(results)
     results_path = TABLE_DIR / "baseline_metrics.csv"

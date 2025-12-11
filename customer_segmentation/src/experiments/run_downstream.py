@@ -1,10 +1,21 @@
-"""Downstream promotion-response prediction with cluster IDs as features."""
+"""Downstream promotion-response prediction with cluster IDs as features.
+
+We compare four feature configurations:
+
+1) Base features only.
+2) Base + KMeans cluster IDs.
+3) Base + GMM cluster IDs.
+4) Base + RAJC cluster IDs.
+"""
+
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 import sys
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Sequence, Optional
 
+import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
@@ -27,83 +38,175 @@ def _ensure_output_dirs() -> None:
 
 
 def _prepare_features() -> Tuple[pd.DataFrame, pd.Series]:
+    """Load raw data, clean it and build the engineered feature matrix."""
     raw = load_raw_data(parse_dates=["Dt_Customer"])
     cleaned = clean_data(raw)
     features_df, labels, _ = assemble_feature_table(cleaned)
     return features_df, labels
 
 
-def _one_hot_clusters(cluster_labels: pd.Series) -> pd.DataFrame:
-    return pd.get_dummies(cluster_labels, prefix="cluster", dtype=int)
+def _one_hot_clusters(
+    cluster_labels: pd.Series | np.ndarray,
+    index: Optional[pd.Index] = None,
+    prefix: str = "cluster",
+) -> pd.DataFrame:
+    """Convert cluster labels into one-hot encoded indicator features."""
+    if not isinstance(cluster_labels, pd.Series):
+        cluster_labels = pd.Series(cluster_labels, index=index)
+    return pd.get_dummies(cluster_labels, prefix=prefix, dtype=int)
+
+
+def _add_cluster_features(
+    train_x: pd.DataFrame,
+    test_x: pd.DataFrame,
+    train_labels: pd.Series | np.ndarray,
+    test_labels: pd.Series | np.ndarray,
+    prefix: str,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Append one-hot cluster indicators to train/test features.
+
+    Ensures train and test have the **same dummy columns** even if some
+    clusters are absent in the test set.
+    """
+    train_dummies = _one_hot_clusters(train_labels, index=train_x.index, prefix=prefix)
+    test_dummies = _one_hot_clusters(test_labels, index=test_x.index, prefix=prefix)
+
+    # Align columns to training dummies; unseen clusters in test are filled with 0.
+    test_dummies = test_dummies.reindex(columns=train_dummies.columns, fill_value=0)
+
+    train_aug = pd.concat([train_x, train_dummies], axis=1)
+    test_aug = pd.concat([test_x, test_dummies], axis=1)
+    return train_aug, test_aug
 
 
 def _train_classifier(train_x: pd.DataFrame, train_y: pd.Series) -> LogisticRegression:
+    """Fit a logistic regression classifier with balanced class weights."""
     clf = LogisticRegression(max_iter=500, class_weight="balanced")
     clf.fit(train_x, train_y)
     return clf
 
 
-def _evaluate_model(model: LogisticRegression, test_x: pd.DataFrame, test_y: pd.Series) -> Dict:
+def _evaluate_model(
+    model: LogisticRegression, test_x: pd.DataFrame, test_y: pd.Series
+) -> Dict[str, float]:
+    """Compute evaluation metrics for a trained classifier."""
     probas = pd.Series(model.predict_proba(test_x)[:, 1], index=test_x.index)
     preds = pd.Series(model.predict(test_x), index=test_x.index)
     return prediction_eval.compute_classification_metrics(test_y, preds, probas)
 
 
-def main() -> None:
+def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Downstream response prediction using cluster IDs as features."
+    )
+    parser.add_argument(
+        "--test-size",
+        type=float,
+        default=0.2,
+        help="Fraction of data used as test set (default: 0.2).",
+    )
+    parser.add_argument(
+        "--random-state",
+        type=int,
+        default=42,
+        help="Random seed for train/test split (default: 42).",
+    )
+    parser.add_argument(
+        "--skip-gmm",
+        action="store_true",
+        help="Skip GMM cluster features.",
+    )
+    parser.add_argument(
+        "--skip-rajc",
+        action="store_true",
+        help="Skip RAJC cluster features.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[Sequence[str]] = None) -> None:
     logger = configure_logging()
     _ensure_output_dirs()
+    args = _parse_args(argv)
 
     try:
         features, responses = _prepare_features()
     except FileNotFoundError as exc:
         logger.error("%s", exc)
         logger.error(
-            "Run `python -m customer_segmentation.src.data.check_data` to verify dataset placement."
+            "Run `python -m customer_segmentation.src.data.check_data` "
+            "to verify dataset placement."
         )
         sys.exit(1)
+
     train_x, test_x, train_y, test_y = train_test_split(
-        features, responses, test_size=0.2, random_state=42, stratify=responses
+        features,
+        responses,
+        test_size=args.test_size,
+        random_state=args.random_state,
+        stratify=responses,
     )
 
+    results = []
+
+    # 1) Base model
     logger.info("Training base logistic regression without cluster IDs")
     base_clf = _train_classifier(train_x, train_y)
     base_metrics = _evaluate_model(base_clf, test_x, test_y)
     base_metrics["model"] = "base"
+    results.append(base_metrics)
 
-    logger.info("Training with KMeans cluster IDs")
+    # 2) KMeans clusters
+    logger.info("Training logistic regression with KMeans cluster IDs")
     kmeans_model = KMeansBaseline(KMeansConfig())
     kmeans_model.fit(train_x)
     kmeans_labels_train = kmeans_model.predict(train_x)
     kmeans_labels_test = kmeans_model.predict(test_x)
-    kmeans_train = pd.concat([train_x, _one_hot_clusters(kmeans_labels_train)], axis=1)
-    kmeans_test = pd.concat([test_x, _one_hot_clusters(kmeans_labels_test)], axis=1)
+    kmeans_train, kmeans_test = _add_cluster_features(
+        train_x, test_x, kmeans_labels_train, kmeans_labels_test, prefix="kmeans"
+    )
     kmeans_clf = _train_classifier(kmeans_train, train_y)
     kmeans_metrics = _evaluate_model(kmeans_clf, kmeans_test, test_y)
     kmeans_metrics["model"] = "base+kmeansid"
+    results.append(kmeans_metrics)
 
-    logger.info("Training with GMM cluster IDs")
-    gmm_model = GMMBaseline(GMMConfig())
-    gmm_model.fit(train_x)
-    gmm_labels_train = gmm_model.predict(train_x)
-    gmm_labels_test = gmm_model.predict(test_x)
-    gmm_train = pd.concat([train_x, _one_hot_clusters(gmm_labels_train)], axis=1)
-    gmm_test = pd.concat([test_x, _one_hot_clusters(gmm_labels_test)], axis=1)
-    gmm_clf = _train_classifier(gmm_train, train_y)
-    gmm_metrics = _evaluate_model(gmm_clf, gmm_test, test_y)
-    gmm_metrics["model"] = "base+gmmid"
+    # 3) GMM clusters (optional)
+    if not args.skip_gmm:
+        logger.info("Training logistic regression with GMM cluster IDs")
+        try:
+            gmm_model = GMMBaseline(GMMConfig())
+            gmm_model.fit(train_x)
+            gmm_labels_train = gmm_model.predict(train_x)
+            gmm_labels_test = gmm_model.predict(test_x)
+            gmm_train, gmm_test = _add_cluster_features(
+                train_x, test_x, gmm_labels_train, gmm_labels_test, prefix="gmm"
+            )
+            gmm_clf = _train_classifier(gmm_train, train_y)
+            gmm_metrics = _evaluate_model(gmm_clf, gmm_test, test_y)
+            gmm_metrics["model"] = "base+gmmid"
+            results.append(gmm_metrics)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception("GMM downstream pipeline failed: %s", exc)
 
-    logger.info("Training with RAJC cluster IDs")
-    rajc_model = RAJCModel(RAJCConfig())
-    rajc_model.fit(train_x, train_y)
-    rajc_labels_train = rajc_model.assignments_
-    rajc_labels_test = rajc_model.predict_clusters(test_x)
-    rajc_train = pd.concat([train_x, _one_hot_clusters(rajc_labels_train)], axis=1)
-    rajc_test = pd.concat([test_x, _one_hot_clusters(rajc_labels_test)], axis=1)
-    rajc_clf = _train_classifier(rajc_train, train_y)
-    rajc_metrics = _evaluate_model(rajc_clf, rajc_test, test_y)
-    rajc_metrics["model"] = "base+rajcid"
+    # 4) RAJC clusters (optional)
+    if not args.skip_rajc:
+        logger.info("Training logistic regression with RAJC cluster IDs")
+        try:
+            rajc_model = RAJCModel(RAJCConfig())
+            rajc_model.fit(train_x, train_y)
+            rajc_labels_train = rajc_model.assignments_
+            rajc_labels_test = rajc_model.predict_clusters(test_x)
+            rajc_train, rajc_test = _add_cluster_features(
+                train_x, test_x, rajc_labels_train, rajc_labels_test, prefix="rajc"
+            )
+            rajc_clf = _train_classifier(rajc_train, train_y)
+            rajc_metrics = _evaluate_model(rajc_clf, rajc_test, test_y)
+            rajc_metrics["model"] = "base+rajcid"
+            results.append(rajc_metrics)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception("RAJC downstream pipeline failed: %s", exc)
 
-    results_df = pd.DataFrame([base_metrics, kmeans_metrics, gmm_metrics, rajc_metrics])
+    results_df = pd.DataFrame(results)
     results_path = TABLE_DIR / "downstream_metrics.csv"
     results_df.to_csv(results_path, index=False)
     logger.info("Saved downstream prediction metrics to %s", results_path)

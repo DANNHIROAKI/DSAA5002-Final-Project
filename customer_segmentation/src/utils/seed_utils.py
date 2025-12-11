@@ -11,12 +11,15 @@ import numpy as np
 
 
 def _seed_torch(seed: int) -> None:
-    """Seed torch if it is available in the environment."""
+    """Seed PyTorch RNGs if the library is available.
 
+    This is a no-op when PyTorch is not installed. It also configures cuDNN
+    to be deterministic when possible.
+    """
     if importlib.util.find_spec("torch") is None:
         return
 
-    import torch
+    import torch  # type: ignore[import]
 
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
@@ -29,13 +32,13 @@ def set_global_seed(seed: int = 42, *, deterministic: bool = True) -> None:
 
     Parameters
     ----------
-    seed:
+    seed :
         Seed value to apply across libraries. Defaults to 42.
-    deterministic:
-        When True, also configures deterministic behavior for supported backends
-        (currently PyTorch cuDNN). Has no effect when the backend is absent.
+    deterministic :
+        When True, also configures deterministic behavior for supported
+        backends (currently PyTorch cuDNN). Has no effect when the backend
+        is absent.
     """
-
     os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)
     np.random.seed(seed)
@@ -46,7 +49,6 @@ def set_global_seed(seed: int = 42, *, deterministic: bool = True) -> None:
 
 def reproducible_numpy_rng(seed: Optional[int] = None) -> np.random.Generator:
     """Return a NumPy Generator seeded for reproducible sampling."""
-
     return np.random.default_rng(seed)
 
 
