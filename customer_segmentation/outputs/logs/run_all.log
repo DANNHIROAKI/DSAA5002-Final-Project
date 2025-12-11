@@ -50,3 +50,34 @@
 [2025-12-11 09:06:27,402] INFO - run_all - Generating RAJC profile plots (income, RFM, channels, etc.).
 [2025-12-11 09:06:29,111] INFO - run_all - Finished step: Figure generation
 [2025-12-11 09:06:29,111] INFO - run_all - ✅ All selected experiments and plots completed successfully.
+[2025-12-11 16:56:33,245] INFO - run_all - Global log file: /home/dhy/PhD/DSAA5002-Final-Project/customer_segmentation/outputs/logs/run_all.log
+[2025-12-11 16:56:33,245] INFO - run_all - ✅ Found dataset at /home/dhy/PhD/DSAA5002-Final-Project/customer_segmentation/data/raw/marketing_campaign.csv
+[2025-12-11 16:56:34,912] INFO - run_all - Global random seed set to 42
+[2025-12-11 16:56:34,912] INFO - run_all - Planned steps (in order): Baseline clustering -> RAJC main experiment -> Downstream prediction -> RAJC ablation -> Figure generation
+[2025-12-11 16:56:34,913] INFO - run_all - ================================================================================
+[2025-12-11 16:56:34,913] INFO - run_all - Starting step: Baseline clustering
+[2025-12-11 16:56:34,913] INFO - run_all - ================================================================================
+[2025-12-11 16:56:35,903] INFO - run_all - Finished step: Baseline clustering
+[2025-12-11 16:56:35,903] INFO - run_all - ================================================================================
+[2025-12-11 16:56:35,903] INFO - run_all - Starting step: RAJC main experiment
+[2025-12-11 16:56:35,903] INFO - run_all - ================================================================================
+[2025-12-11 16:56:36,105] INFO - run_all - Finished step: RAJC main experiment
+[2025-12-11 16:56:36,105] INFO - run_all - ================================================================================
+[2025-12-11 16:56:36,105] INFO - run_all - Starting step: Downstream prediction
+[2025-12-11 16:56:36,105] INFO - run_all - ================================================================================
+[2025-12-11 16:56:36,467] INFO - run_all - Finished step: Downstream prediction
+[2025-12-11 16:56:36,467] INFO - run_all - ================================================================================
+[2025-12-11 16:56:36,467] INFO - run_all - Starting step: RAJC ablation
+[2025-12-11 16:56:36,467] INFO - run_all - ================================================================================
+[2025-12-11 16:56:43,933] INFO - run_all - Finished step: RAJC ablation
+[2025-12-11 16:56:43,934] INFO - run_all - ================================================================================
+[2025-12-11 16:56:43,934] INFO - run_all - Starting step: Figure generation
+[2025-12-11 16:56:43,934] INFO - run_all - ================================================================================
+[2025-12-11 16:56:43,934] INFO - run_all - Loading data for plotting.
+[2025-12-11 16:56:43,978] INFO - run_all - Generating elbow curve for RFM K-Means baseline.
+[2025-12-11 16:58:55,241] INFO - run_all - Generating PCA scatter for RAJC clusters.
+[2025-12-11 16:58:55,393] INFO - run_all - Generating silhouette distribution for RAJC clusters.
+[2025-12-11 16:58:55,581] INFO - run_all - Generating RAJC cluster centers plot.
+[2025-12-11 16:58:55,792] INFO - run_all - Generating RAJC profile plots (income, RFM, channels, etc.).
+[2025-12-11 16:58:57,492] INFO - run_all - Finished step: Figure generation
+[2025-12-11 16:58:57,492] INFO - run_all - ✅ All selected experiments and plots completed successfully.
