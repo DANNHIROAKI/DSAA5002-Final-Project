@@ -26,11 +26,12 @@ def load_raw_data(
     Parameters
     ----------
     data_dir :
-        Directory containing the raw CSV file.
+        Directory containing the raw CSV file. Defaults to the project ``data/raw``.
     filename :
         Dataset filename (defaults to ``marketing_campaign.csv``).
     parse_dates :
         Optional list of columns to parse as datetimes (e.g., ``["Dt_Customer"]``).
+        If ``None``, no date parsing is attempted.
     min_expected_columns :
         Minimum number of columns that a valid dataset is expected to have.
         If the initial read yields fewer columns than this threshold, a second
@@ -62,7 +63,8 @@ def load_raw_data(
         # an unexpected delimiter collapsing the header into a single column.
         df = None
 
-    # If parsing failed or produced suspiciously few columns, try auto-detecting the separator.
+    # If parsing failed or produced suspiciously few columns,
+    # try auto-detecting the separator.
     if df is None or df.shape[1] < min_expected_columns:
         try:
             df = pd.read_csv(

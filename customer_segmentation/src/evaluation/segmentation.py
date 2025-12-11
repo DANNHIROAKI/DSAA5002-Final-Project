@@ -1,9 +1,18 @@
-"""Business-focused segmentation metrics."""
+"""Business-focused segmentation metrics.
+
+This module provides utilities for analysing how well a clustering
+separates customers with respect to promotion response, including:
+
+- Per-cluster response rates.
+- Variance and range of response rates across clusters.
+- Per-cluster summary tables for profiling.
+- A simple cluster-level campaign allocation simulator with lift.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -27,21 +36,32 @@ def cluster_response_rates(
     pd.Series
         Index is cluster id, value is mean response rate in that cluster.
     """
-    # Align indices and drop rows with missing labels.
     df = pd.concat(
         {"cluster": cluster_labels, "response": responses}, axis=1
     ).dropna(subset=["cluster", "response"])
 
-    # Ensure integer / categorical cluster labels behave well.
     rates = df.groupby("cluster")["response"].mean().sort_index()
     return rates
 
 
 def response_rate_variance(rates: pd.Series) -> float:
-    """Variance of response rates across clusters (population variance)."""
+    """Population variance of response rates across clusters.
+
+    Returns ``nan`` when `rates` is empty.
+    """
     if rates.empty:
         return float("nan")
     return float(rates.var(ddof=0))
+
+
+def response_rate_range(rates: pd.Series) -> float:
+    """Range (max - min) of response rates across clusters.
+
+    Returns ``nan`` when `rates` is empty.
+    """
+    if rates.empty:
+        return float("nan")
+    return float(rates.max() - rates.min())
 
 
 def cluster_response_summary(
@@ -62,15 +82,36 @@ def cluster_response_summary(
         Number of responding customers.
     response_rate :
         Fraction of responders in the cluster.
+    lift_vs_overall :
+        Cluster response rate divided by overall response rate. When the
+        overall response rate is zero, this column is filled with NaNs.
     """
     df = pd.concat(
         {"cluster": cluster_labels, "response": responses}, axis=1
     ).dropna(subset=["cluster", "response"])
 
+    if df.empty:
+        return pd.DataFrame(
+            columns=[
+                "cluster",
+                "size",
+                "fraction",
+                "responders",
+                "response_rate",
+                "lift_vs_overall",
+            ]
+        )
+
     group = df.groupby("cluster")
     size = group.size()
     responders = group["response"].sum()
     rates = responders / size
+    overall_rate = df["response"].mean()
+
+    if overall_rate > 0:
+        lift = rates / overall_rate
+    else:
+        lift = np.nan * np.ones_like(rates, dtype=float)
 
     summary = pd.DataFrame(
         {
@@ -79,6 +120,7 @@ def cluster_response_summary(
             "fraction": size.values / size.values.sum(),
             "responders": responders.values,
             "response_rate": rates.values,
+            "lift_vs_overall": lift.values,
         }
     )
     return summary.sort_values("cluster").reset_index(drop=True)
@@ -105,7 +147,8 @@ def campaign_allocation_lift(
 
     We assume the marketer can contact at most ``budget_ratio`` fraction of all
     customers. Customers are selected cluster-by-cluster in descending order of
-    cluster response rate, until the budget is exhausted.
+    cluster response rate, until the budget is exhausted *or* the next whole
+    cluster would exceed the budget (we do not partially split clusters).
 
     Parameters
     ----------
@@ -151,7 +194,7 @@ def campaign_allocation_lift(
     budget = int(np.ceil(budget_ratio * n_total))
     selected_mask = np.zeros(n_total, dtype=bool)
 
-    # Greedy selection of clusters until budget is reached
+    # Greedy selection of whole clusters until budget is reached
     for c in ordered_clusters:
         idx = df["cluster"] == c
         idx_positions = np.where(idx.to_numpy())[0]
@@ -160,19 +203,25 @@ def campaign_allocation_lift(
             selected_mask[idx_positions] = True
         else:
             # If taking the whole cluster would exceed budget, stop.
-            # (Alternative: take a random subset of this cluster.)
+            # (A more complex variant could sample within this cluster.)
             break
 
     selected_df = df[selected_mask]
     selected_fraction = selected_df.shape[0] / n_total
 
-    baseline_response_rate = df["response"].mean()
+    baseline_response_rate = float(df["response"].mean())
     overall_response_rate = (
-        selected_df["response"].mean() if selected_df.shape[0] > 0 else float("nan")
+        float(selected_df["response"].mean())
+        if selected_df.shape[0] > 0
+        else float("nan")
     )
     expected_positives = int(selected_df["response"].sum())
 
-    if np.isnan(overall_response_rate) or np.isnan(baseline_response_rate) or baseline_response_rate == 0:
+    if (
+        np.isnan(overall_response_rate)
+        or np.isnan(baseline_response_rate)
+        or baseline_response_rate == 0
+    ):
         lift = float("nan")
     else:
         lift = overall_response_rate / baseline_response_rate
@@ -181,7 +230,7 @@ def campaign_allocation_lift(
         budget_ratio=budget_ratio,
         selected_fraction=selected_fraction,
         expected_positives=expected_positives,
-        overall_response_rate=float(overall_response_rate),
-        baseline_response_rate=float(baseline_response_rate),
+        overall_response_rate=overall_response_rate,
+        baseline_response_rate=baseline_response_rate,
         lift=float(lift),
     )

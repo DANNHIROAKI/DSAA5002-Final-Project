@@ -12,6 +12,9 @@ Typical usage
 ...     run_ablation,
 ... )
 >>> run_baselines()   # equivalent to: python -m ...run_baselines
+
+By default, :mod:`run_rajc` uses the RAJC-v2 configuration
+(model_type="constant_prob") defined in ``configs/rajc.yaml``.
 """
 
 from __future__ import annotations

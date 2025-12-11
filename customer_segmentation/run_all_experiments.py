@@ -9,7 +9,8 @@ This script will:
    - RAJC main experiment
    - Downstream response prediction with cluster IDs
    - RAJC ablation over lambda and K
-4. Generate key figures for the report (elbow curve, RAJC cluster plots, profiles).
+4. Optionally generate key figures for the report
+   (elbow curve, RAJC cluster plots, profiles).
 
 Results are written under ``customer_segmentation/outputs`` as defined
 in the individual experiment scripts.
@@ -21,9 +22,10 @@ import argparse
 import logging
 from pathlib import Path
 import sys
-from typing import Optional, Sequence, Callable, List
+from typing import Optional, Sequence, Callable, List, Tuple
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 from sklearn.cluster import KMeans
 
@@ -77,7 +79,9 @@ FIG_PROFILES_DIR = FIG_DIR / "profiles"
 # CLI parsing & logging
 # ---------------------------------------------------------------------------
 
+
 def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    """Parse command-line arguments for the end-to-end launcher."""
     parser = argparse.ArgumentParser(
         description="Run all DSAA5002 final project experiments end-to-end.",
     )
@@ -127,10 +131,13 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Skip figure generation step.",
     )
     parser.add_argument(
-        "--stop-on-error",
+        "--keep-going",
         action="store_true",
-        default=True,
-        help="Stop immediately if any sub-experiment fails (default: True).",
+        default=False,
+        help=(
+            "If set, continue running remaining steps even if one step fails. "
+            "By default, the script stops on the first failure."
+        ),
     )
     return parser.parse_args(argv)
 
@@ -189,22 +196,65 @@ def _run_step(
 # Plot generation
 # ---------------------------------------------------------------------------
 
+
 def _ensure_figure_dirs() -> None:
     """Ensure figure output directories exist."""
     for d in (FIG_DIR, FIG_BASELINES_DIR, FIG_RAJC_DIR, FIG_PROFILES_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
 
-def _generate_plots(logger: logging.Logger) -> None:
-    """Generate key figures for baselines and RAJC clusters."""
-
-    _ensure_figure_dirs()
-
-    logger.info("Preparing data for plotting.")
-    # 重复一遍数据加载/特征构造，方便画图时使用
+def _load_core_data_for_plots(logger: logging.Logger) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
+    """Helper: load raw/cleaned data and assemble core feature/label table."""
+    logger.info("Loading data for plotting.")
     raw = load_raw_data(parse_dates=["Dt_Customer"])
     cleaned = clean_data(raw)
     features, responses, _ = assemble_feature_table(cleaned)
+    return cleaned, features, responses
+
+
+def _align_rajc_assignments(
+    features: pd.DataFrame,
+    logger: logging.Logger,
+) -> pd.Series:
+    """Load RAJC assignments and align index with the feature table.
+
+    如果索引有不一致，会给出 warning，并用众数簇填补缺失，避免画图时直接崩溃。
+    """
+    assignments_path = TABLE_DIR / "rajc_assignments.csv"
+    if not assignments_path.is_file():
+        raise FileNotFoundError(assignments_path)
+
+    raw_assignments = pd.read_csv(assignments_path, index_col=0)["cluster"]
+
+    # 对齐索引顺序
+    rajc_assignments = raw_assignments.reindex(features.index)
+
+    if rajc_assignments.isna().any():
+        n_missing = int(rajc_assignments.isna().sum())
+        logger.warning(
+            "RAJC assignments missing for %d samples; filling them with the "
+            "most frequent cluster for plotting only.",
+            n_missing,
+        )
+        if rajc_assignments.notna().any():
+            most_freq = int(rajc_assignments.dropna().mode().iloc[0])
+        else:
+            # 极端情况：全部 NA，就统一设为 0
+            most_freq = 0
+        rajc_assignments = rajc_assignments.fillna(most_freq)
+
+    return rajc_assignments.astype(int)
+
+
+def _generate_plots(logger: logging.Logger) -> None:
+    """Generate key figures for baselines and RAJC clusters."""
+    _ensure_figure_dirs()
+
+    try:
+        cleaned, features, responses = _load_core_data_for_plots(logger)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.exception("Failed to prepare data for plotting: %s", exc)
+        return
 
     # -------------------- 1) Baseline: RFM KMeans Elbow --------------------
     try:
@@ -218,7 +268,7 @@ def _generate_plots(logger: logging.Logger) -> None:
             km = KMeans(
                 n_clusters=k,
                 random_state=42,
-                n_init="auto",
+                n_init=10,  # use explicit int to be compatible across sklearn versions
             )
             km.fit(rfm)
             inertias.append(float(km.inertia_))
@@ -226,20 +276,15 @@ def _generate_plots(logger: logging.Logger) -> None:
         fig = plot_elbow_curve(ks, inertias, title="Elbow curve (RFM K-Means)")
         fig.savefig(FIG_BASELINES_DIR / "elbow_rfm_kmeans.png", bbox_inches="tight")
         plt.close(fig)
-    except Exception as exc:  # pragma: no cover - 防御性
+    except Exception as exc:  # pragma: no cover - defensive
         logger.exception("Failed to generate elbow curve plot: %s", exc)
 
     # -------------------- 2) RAJC cluster-level plots ----------------------
     try:
-        assignments_path = TABLE_DIR / "rajc_assignments.csv"
-        if not assignments_path.is_file():
-            raise FileNotFoundError(assignments_path)
-        rajc_assignments = pd.read_csv(assignments_path, index_col=0)["cluster"]
-        # 对齐索引
-        rajc_assignments = rajc_assignments.loc[features.index]
+        rajc_assignments = _align_rajc_assignments(features, logger)
     except Exception as exc:
         logger.exception(
-            "Failed to load RAJC assignments for plotting: %s. "
+            "Failed to load or align RAJC assignments for plotting: %s. "
             "Skipping RAJC plots.",
             exc,
         )
@@ -262,9 +307,15 @@ def _generate_plots(logger: logging.Logger) -> None:
             rajc_assignments,
             title="RAJC silhouette distribution",
         )
-        fig.savefig(FIG_RAJC_DIR / "rajc_silhouette_distribution.png", bbox_inches="tight")
+        fig.savefig(
+            FIG_RAJC_DIR / "rajc_silhouette_distribution.png",
+            bbox_inches="tight",
+        )
         plt.close(fig)
-    except Exception as exc:
+    except ValueError as exc:
+        # e.g. if RAJC 只产生了 1 个簇，会触发 silhouette 的报错
+        logger.warning("Cannot compute RAJC silhouette distribution: %s", exc)
+    except Exception as exc:  # pragma: no cover - defensive
         logger.exception("Failed to generate RAJC silhouette plot: %s", exc)
 
     # 2.3 Feature-space cluster centers
@@ -288,7 +339,10 @@ def _generate_plots(logger: logging.Logger) -> None:
 
         # 3.1 收入 vs 总消费
         fig = plot_income_vs_spent(rfm_df, clusters)
-        fig.savefig(FIG_PROFILES_DIR / "rajc_income_vs_monetary.png", bbox_inches="tight")
+        fig.savefig(
+            FIG_PROFILES_DIR / "rajc_income_vs_monetary.png",
+            bbox_inches="tight",
+        )
         plt.close(fig)
 
         # 3.2 RFM 箱线图
@@ -319,7 +373,9 @@ def _generate_plots(logger: logging.Logger) -> None:
 # Main entry
 # ---------------------------------------------------------------------------
 
+
 def main(argv: Optional[Sequence[str]] = None) -> None:
+    """Main entrypoint for running all experiments and plots."""
     args = _parse_args(argv)
     logger = _configure_global_logging()
 
@@ -331,9 +387,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     logger.info("Global random seed set to %d", args.seed)
 
     # 3) Build experiment plan
-    steps: list[tuple[str, Callable[[], None]]] = []
+    steps: List[Tuple[str, Callable[[], None]]] = []
     if not args.skip_baselines:
-        # run_baselines([]) runs all 4 clustering baselines.
+        # run_baselines([]) runs all clustering baselines.
         steps.append(("Baseline clustering", lambda: run_baselines([])))
     if not args.skip_rajc:
         # run_rajc([]) fits and evaluates RAJC.
@@ -357,10 +413,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         " -> ".join(name for name, _ in steps),
     )
 
+    stop_on_error = not args.keep_going
+
     # 4) Run all steps
     for name, func in steps:
         try:
-            _run_step(name, func, logger, args.stop_on_error)
+            _run_step(name, func, logger, stop_on_error=stop_on_error)
         except SystemExit:
             logger.error("Stopping run_all due to SystemExit from step '%s'.", name)
             sys.exit(1)

@@ -12,7 +12,7 @@ from sklearn.model_selection import train_test_split
 REFERENCE_YEAR = 2024
 
 # Quantiles used to mitigate extreme outliers (Winsorization),
-# consistent with the Tutorial's suggestion to handle Income and Age outliers. :contentReference[oaicite:5]{index=5}
+# consistent with the Tutorial's suggestion to handle Income and Age outliers. :contentReference[oaicite:1]{index=1}
 INCOME_CLIP_QUANTILES = (0.01, 0.99)
 AGE_CLIP_QUANTILES = (0.01, 0.99)
 
@@ -63,7 +63,7 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
     5. Derive ``Age`` from ``Year_Birth`` using :data:`REFERENCE_YEAR`.
     6. Winsorize ``Income`` and ``Age`` using quantile clipping to reduce
        the impact of extreme outliers, reflecting the instructor's recommendation
-       to handle obvious outliers in these fields. :contentReference[oaicite:6]{index=6}
+       to handle obvious outliers in these fields. :contentReference[oaicite:2]{index=2}
 
     Parameters
     ----------
@@ -116,6 +116,12 @@ def train_val_split(
     label_col: str = "response",
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Split the cleaned dataset into training and validation subsets with stratification.
+
+    This helper works both *before* and *after* label construction:
+
+    - If ``label_col`` is present, a stratified split on the label is performed
+      (useful for downstream response prediction).
+    - If the label column is absent, the split is purely random.
 
     Parameters
     ----------

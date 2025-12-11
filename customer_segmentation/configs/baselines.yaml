@@ -1,29 +1,54 @@
-# Hyperparameter placeholders for baseline clustering methods.
+# Hyperparameters for baseline clustering methods.
+
+# Baseline 1: RFM-only K-Means (default topic baseline)
 rfm_kmeans:
   n_clusters: 4
   init: k-means++
+  n_init: 10
   max_iter: 300
   random_state: 42
+  # 只用 R / F / M 三个行为特征做聚类
   use_features: ["recency", "frequency", "monetary"]
 
+# Baseline 2: Full-behavior K-Means
 full_kmeans:
   n_clusters: 4
   init: k-means++
+  n_init: 10
   max_iter: 300
   random_state: 42
+  # 在 features.py 中，这几个 group 对应一组行为特征列
+  # - rfm: Recency / Frequency / Monetary
+  # - products: 各品类消费金额 / 占比
+  # - channels: Web / Catalog / Store 等渠道使用情况
+  # - demographics: Age, family_size, education, marital_status 等
   use_features: ["rfm", "products", "channels", "demographics"]
 
+# Baseline 3: Gaussian Mixture Model on full-behavior features
 gmm:
   n_components: 4
   covariance_type: full
   max_iter: 200
   random_state: 42
+  # 和 full_kmeans 使用同一组行为特征
+  use_features: ["rfm", "products", "channels", "demographics"]
 
+# Baseline 4: Two-stage "Cluster-then-Predict"
 cluster_then_predict:
+  # 先用哪个聚类器生成簇标签（当前用 full_kmeans）
   base_clusters: full_kmeans
+
   classifier: logistic_regression
   classifier_params:
     penalty: l2
     C: 1.0
     max_iter: 200
     class_weight: balanced
+    random_state: 42
+
+  # （可选）用于下游分类器的特征配置：
+  # behavior_groups：与聚类一致的行为特征
+  # response_groups：与响应相关、但不直接包含 AcceptedCmp*/Response 的特征
+  classifier_features:
+    behavior_groups: ["rfm", "products", "channels", "demographics"]
+    response_groups: ["promotion", "web_activity"]

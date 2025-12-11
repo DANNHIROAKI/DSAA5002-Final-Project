@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
 
-from .kmeans_baseline import KMeansBaseline, KMeansConfig, run_kmeans
+from .kmeans_baseline import KMeansBaseline, KMeansConfig
 
 
 class _ConstantProbClassifier:
@@ -31,7 +31,19 @@ class _ConstantProbClassifier:
 
 @dataclass
 class ClusterThenPredictConfig:
-    """Configuration for the two-stage baseline."""
+    """Configuration for the two-stage baseline.
+
+    Parameters
+    ----------
+    n_clusters :
+        Number of clusters for the initial K-Means.
+    random_state :
+        Random seed for reproducibility.
+    max_iter :
+        Maximum iterations for the per-cluster logistic regressions.
+    kmeans_n_init :
+        Number of random initializations for K-Means.
+    """
 
     n_clusters: int = 4
     random_state: int = 42
@@ -49,17 +61,27 @@ def fit_cluster_then_predict(
     For each cluster, a logistic regression is trained if both positive and
     negative examples are present; otherwise a constant-probability classifier
     is used instead.
+
+    Returns
+    -------
+    kmeans :
+        Fitted KMeansBaseline model.
+    classifiers :
+        Mapping from cluster_id to classifier (LogisticRegression or
+        _ConstantProbClassifier).
+    cluster_assignments :
+        Series of cluster labels for the training data.
     """
     cfg = config or ClusterThenPredictConfig()
 
+    # Use KMeansBaseline directly so that cfg.kmeans_n_init is honoured.
     kmeans_cfg = KMeansConfig(
         n_clusters=cfg.n_clusters,
         random_state=cfg.random_state,
         n_init=cfg.kmeans_n_init,
     )
-    kmeans, cluster_assignments = run_kmeans(
-        features, n_clusters=kmeans_cfg.n_clusters, random_state=kmeans_cfg.random_state
-    )
+    kmeans = KMeansBaseline(kmeans_cfg).fit(features)
+    cluster_assignments = kmeans.predict(features)
 
     classifiers: Dict[int, object] = {}
     for cluster_id in sorted(cluster_assignments.unique()):
@@ -68,6 +90,8 @@ def fit_cluster_then_predict(
             continue
 
         y_cluster = labels.loc[idx]
+        X_cluster = features.loc[idx]
+
         # If only one class present, fall back to constant-prob classifier
         if y_cluster.nunique() < 2:
             p = float(y_cluster.mean())
@@ -77,7 +101,7 @@ def fit_cluster_then_predict(
                 max_iter=cfg.max_iter,
                 class_weight="balanced",
             )
-            clf.fit(features.loc[idx], y_cluster)
+            clf.fit(X_cluster, y_cluster)
 
         classifiers[cluster_id] = clf
 
@@ -93,6 +117,13 @@ def predict_with_clusters(
 
     Any samples assigned to clusters without a classifier receive a neutral
     probability of 0.5.
+
+    Returns
+    -------
+    probs :
+        Predicted positive-class probability for each sample.
+    binary :
+        Binary predictions obtained by thresholding probs at 0.5.
     """
     preds = pd.Series(index=features.index, dtype=float)
 

@@ -1,7 +1,7 @@
 """Data loading, cleaning, and feature engineering utilities.
 
 This package provides a small, cohesive API for working with the
-marketing campaign dataset used in the DSAA 5002 final project. :contentReference[oaicite:8]{index=8}
+marketing campaign dataset used in the DSAA 5002 final project. :contentReference[oaicite:3]{index=3}
 
 Typical usage
 -------------
@@ -10,10 +10,12 @@ Typical usage
 ...     clean_data,
 ...     assemble_feature_table,
 ... )
-
+>>>
 >>> df_raw = load_raw_data(parse_dates=["Dt_Customer"])
 >>> df_clean = clean_data(df_raw)
 >>> X, y, transformer = assemble_feature_table(df_clean)
+>>> from customer_segmentation.src.data import split_behavior_and_response_features
+>>> X_beh, X_resp = split_behavior_and_response_features(X, transformer)
 """
 
 from __future__ import annotations
@@ -25,6 +27,10 @@ from .features import (
     assemble_feature_table,
     build_rfm_features,
     add_structural_features,
+    split_behavior_and_response_features,
+    BEHAVIOR_NUMERIC_FEATURES,
+    RESPONSE_NUMERIC_FEATURES,
+    CATEGORICAL_FEATURES,
 )
 
 __all__ = [
@@ -35,4 +41,8 @@ __all__ = [
     "assemble_feature_table",
     "build_rfm_features",
     "add_structural_features",
+    "split_behavior_and_response_features",
+    "BEHAVIOR_NUMERIC_FEATURES",
+    "RESPONSE_NUMERIC_FEATURES",
+    "CATEGORICAL_FEATURES",
 ]

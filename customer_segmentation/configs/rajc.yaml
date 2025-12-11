@@ -1,13 +1,38 @@
-# Hyperparameter placeholders for Response-Aware Joint Clustering (RAJC).
+# Hyperparameters for Response-Aware Joint Clustering (RAJC / RAJC-v2).
+
 rajc:
+  # 指定当前使用的 RAJC 变体：
+  # - "constant_prob": RAJC-v2，簇级常数响应概率 p_k（推荐、默认）
+  # - "logreg": 旧版 RAJC，每簇一个逻辑回归（仅用于 ablation）
+  model_type: constant_prob
+
+  # 聚类相关
   n_clusters: 4
-  lambda: 1.0
   max_iter: 20
   tol: 1e-4
   random_state: 42
-  initialization: full_kmeans
+  initialization: full_kmeans      # 目前使用 full-behavior K-Means 初始化
+  # 与 full_kmeans 相同的行为特征组
+  use_features: ["rfm", "products", "channels", "demographics"]
+
+  # 联合目标中的权衡系数
+  # L = sum ||x - mu_z||^2 + lambda * sum CE(y; p_z) + gamma * sum p_k(1-p_k)
+  lambda: 1.0                      # 行为聚类 vs 响应一致性的权衡
+  gamma: 0.1                       # 簇级极化正则，鼓励高/低响应簇；0 表示关闭
+
+  # 簇内响应率估计的 Laplace 平滑：p_k = (pos_k + smoothing)/(n_k + 2*smoothing)
+  smoothing: 1.0
+
+  # 旧版 RAJC-logreg 变体的超参数（仅在你专门调用该变体时才会用到）
+  # RAJC-v2 (constant_prob) 可以完全忽略这一段。
   logistic_regression:
     penalty: l2
     C: 1.0
     max_iter: 200
     class_weight: balanced
+
+  # 可选：供 run_ablation.py 使用的网格（如果你想从配置里读取）
+  ablation:
+    lambda_grid: [0.0, 0.1, 0.3, 1.0, 3.0]
+    gamma_grid: [0.0, 0.1, 1.0]
+    n_clusters_grid: [3, 4, 5, 6]

@@ -1,4 +1,8 @@
-"""Cluster profiling visualizations aligned with the methodology section."""
+"""Cluster profiling visualizations aligned with the methodology section.
+
+这些函数主要用在「簇画像 / Profiling」部分，帮助回答
+“不同簇在收入、消费、年龄、渠道偏好和响应率上有什么差异？”。
+"""
 
 from __future__ import annotations
 
@@ -9,6 +13,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 
+# 全局风格：和报告/PPT 一致的白色网格背景
 sns.set_style("whitegrid")
 
 
@@ -47,7 +52,7 @@ def plot_income_vs_spent(
     """
     _check_required_columns(df, [income_col, monetary_col])
 
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=(6, 4))
     sns.scatterplot(
         data=df,
         x=income_col,
@@ -55,6 +60,8 @@ def plot_income_vs_spent(
         hue=cluster_labels,
         palette="tab10",
         ax=ax,
+        s=20,
+        alpha=0.7,
     )
     ax.set_title("Income vs Monetary by Cluster")
     ax.set_xlabel(income_col)
@@ -97,7 +104,14 @@ def plot_rfm_boxplots(
     )
 
     fig, ax = plt.subplots(figsize=(8, 5))
-    sns.boxplot(data=melted, x="metric", y="value", hue="cluster", palette="tab10", ax=ax)
+    sns.boxplot(
+        data=melted,
+        x="metric",
+        y="value",
+        hue="cluster",
+        palette="tab10",
+        ax=ax,
+    )
     ax.set_title("RFM distributions by cluster")
     ax.set_xlabel("RFM metric")
     ax.set_ylabel("Value")
@@ -134,7 +148,8 @@ def plot_channel_mix(
     _check_required_columns(df, channel_cols)
 
     grouped = df[channel_cols].assign(cluster=cluster_labels).groupby("cluster").mean()
-    proportions = grouped.div(grouped.sum(axis=1), axis=0)
+    # 转成每个簇内部“占比”，而不是绝对次数
+    proportions = grouped.div(grouped.sum(axis=1), axis=0).fillna(0.0)
 
     fig, ax = plt.subplots(figsize=(8, 5))
     bottom = None
@@ -164,7 +179,7 @@ def plot_response_rates(
     save_path: str | Path | None = None,
 ) -> plt.Figure:
     """Bar chart of response rates per cluster for RQ2."""
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=(6, 4))
     response_rates = response_rates.sort_index()
     response_rates.plot(kind="bar", color="steelblue", ax=ax)
     ax.set_xlabel("Cluster")
@@ -221,6 +236,7 @@ def plot_age_income_kde(
     for ax, cluster in zip(axes, unique_clusters):
         subset = clusters[clusters["cluster"] == cluster]
         if subset.empty:
+            ax.set_title(f"Cluster {cluster} (no data)")
             continue
         sns.kdeplot(
             data=subset,

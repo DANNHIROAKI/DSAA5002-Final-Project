@@ -1,39 +1,53 @@
-# Customer Segmentation Project Structure
+# DSAA5002 – Response-Aware Customer Segmentation
 
-This repository organizes the DSAA5002 final project for response-aware customer segmentation. It provides a modular layout for data handling, modeling, evaluation, and reporting.
+This package contains the code for a DSAA5002 final project on **response‑aware
+customer segmentation** based on the Kaggle *Customer Personality Analysis*
+dataset. It implements:
 
-> Note: The raw Kaggle CSV (`marketing_campaign.csv`) is **not tracked in git**. Place it under `data/raw/` before running any pipeline.
+- Several clustering **baselines**:
+  - RFM K‑Means
+  - Full‑feature K‑Means
+  - Gaussian Mixture Model (GMM)
+  - Cluster‑then‑Predict (cluster first, then fit per‑cluster classifiers)
+- A proposed **RAJC** model (Response‑Aware Joint Clustering) that jointly
+  optimizes customer similarity and promotion‑response behavior.
+- An **end‑to‑end launcher** to reproduce all experiments and figures used in
+  the report.
 
-## Layout
-- `data/`: raw and processed datasets.
-- `configs/`: YAML configuration files for baselines and the proposed RAJC model.
-- `src/`: Python source code grouped by functionality (data, models, evaluation, visualization, experiments, utils).
-- `notebooks/`: exploratory analysis and prototyping notebooks.
-- `outputs/`: saved logs, figures, tables, and trained models.
-- `report/`: manuscript and figures used in the final write-up.
+> The raw Kaggle CSV (`marketing_campaign.csv`) is **not tracked in git**.
+> You must place it under `customer_segmentation/data/raw/` before running any
+> pipeline.
 
-## Getting Started
-1. Install dependencies: `pip install -r requirements.txt`.
-2. Place the raw dataset at `data/raw/marketing_campaign.csv`. Run `python -m customer_segmentation.src.data.check_data` to verify presence.
+---
 
-## Running experiments
-All entrypoints assume the working directory is the repository root:
+## Project Layout
 
-- Baselines (RFM/Full K-Means, GMM, Cluster-then-Predict):
-  ```bash
-  python -m customer_segmentation.src.experiments.run_baselines
-  ```
-- Proposed RAJC model:
-  ```bash
-  python -m customer_segmentation.src.experiments.run_rajc
-  ```
-- Ablation over λ and cluster counts:
-  ```bash
-  python -m customer_segmentation.src.experiments.run_ablation
-  ```
-- Downstream promotion-response prediction with cluster IDs:
-  ```bash
-  python -m customer_segmentation.src.experiments.run_downstream
-  ```
+High‑level structure of the `customer_segmentation` package:
 
-Each script will report a clear error if the dataset file is missing and saves tables under `customer_segmentation/outputs/tables/`.
+```text
+customer_segmentation/
+│
+├─ README.md                 # This file
+├─ run_all_experiments.py    # One‑shot launcher for all experiments + plots
+│
+├─ data/
+│   ├─ raw/                  # Raw Kaggle CSV (marketing_campaign.csv)
+│   └─ processed/            # Optional cached features / splits
+│
+├─ configs/
+│   ├─ baselines.yaml        # Hyper‑parameters for all baselines
+│   └─ rajc.yaml             # Hyper‑parameters for the RAJC model
+│
+├─ src/
+│   ├─ data/                 # Loading, cleaning, feature engineering
+│   ├─ models/               # Baselines + RAJC implementation
+│   ├─ evaluation/           # Clustering / segmentation / prediction metrics
+│   ├─ visualization/        # Elbow, PCA/t‑SNE, profile plots
+│   ├─ experiments/          # Individual experiment entrypoints
+│   └─ utils/                # Logging, seeding, small metric helpers
+│
+└─ outputs/
+    ├─ logs/                 # Run logs (including run_all.log)
+    ├─ figures/              # All figures used in the report / slides
+    ├─ tables/               # CSV tables with metrics
+    └─ models/               # (optional) trained model artefacts

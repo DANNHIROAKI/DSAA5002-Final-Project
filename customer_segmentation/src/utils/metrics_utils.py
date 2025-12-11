@@ -1,7 +1,12 @@
 """Utility metrics helpers used across clustering experiments.
 
 These helpers are intentionally lightweight so they can be reused in
-scripts and notebooks without pulling in the full evaluation package.
+scripts and notebooks without pulling in the full evaluation package:
+
+- ``compute_lift``: business-style lift for top-q% customers.
+- ``ClusterResponseStats`` / ``response_rate_by_cluster``: per-cluster response stats.
+- ``summarize_topk_lift``: multiple lift@k in one shot.
+- ``classification_summary``: small bundle of AUC / log-loss / F1 / lift@k.
 """
 
 from __future__ import annotations

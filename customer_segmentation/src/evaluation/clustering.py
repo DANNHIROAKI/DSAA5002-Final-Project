@@ -25,14 +25,16 @@ def compute_scores(
     -------
     dict
         Dictionary with keys:
-        ``"n_clusters"``, ``"silhouette"``, ``"calinski_harabasz"``,
-        and ``"davies_bouldin"``. Metrics that cannot be computed
-        (e.g., only one cluster present) are set to ``None``.
+        ``"n_samples"``, ``"n_clusters"``, ``"silhouette"``,
+        ``"calinski_harabasz"``, and ``"davies_bouldin"``.
+        Metrics that cannot be computed (e.g., only one cluster present)
+        are set to ``None``.
     """
-    n_samples = len(labels)
+    n_samples = int(len(labels))
     n_clusters = int(labels.nunique())
 
     results: Dict[str, Optional[float]] = {
+        "n_samples": float(n_samples),
         "n_clusters": float(n_clusters),
         "silhouette": None,
         "calinski_harabasz": None,

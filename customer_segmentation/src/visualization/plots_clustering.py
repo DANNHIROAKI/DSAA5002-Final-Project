@@ -1,4 +1,11 @@
-"""Visualization helpers for cluster evaluation, elbow plots and embeddings."""
+"""Visualization helpers for cluster evaluation, elbow plots and embeddings.
+
+这些函数主要支撑 RQ1 / Ablation：
+- Elbow 曲线看选 K；
+- Silhouette 分布看簇紧凑度/分离度；
+- PCA / t-SNE 可视化高维特征空间中的簇结构；
+- 簇中心折线图看不同特征上的“形状差异”。
+"""
 
 from __future__ import annotations
 
@@ -34,16 +41,11 @@ def plot_elbow_curve(
         Figure title.
     save_path :
         Optional path to save the figure. When ``None``, the figure is not saved.
-
-    Returns
-    -------
-    matplotlib.figure.Figure
-        The created figure object.
     """
     ks = list(ks)
     inertias = list(inertias)
 
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=(6, 4))
     ax.plot(ks, inertias, marker="o")
     ax.set_xlabel("Number of clusters (K)")
     ax.set_ylabel("Inertia")
@@ -68,17 +70,6 @@ def plot_silhouette_distribution(
 ) -> plt.Figure:
     """Draw per-sample silhouette scores grouped by cluster.
 
-    Parameters
-    ----------
-    features :
-        Feature matrix used for clustering.
-    labels :
-        Cluster labels for each sample.
-    title :
-        Plot title.
-    save_path :
-        Optional path to save the figure.
-
     Raises
     ------
     ValueError
@@ -91,7 +82,7 @@ def plot_silhouette_distribution(
     scores = silhouette_samples(features, labels_series)
     df = pd.DataFrame({"score": scores, "cluster": labels_series})
 
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=(7, 4))
     sns.boxplot(data=df, x="cluster", y="score", ax=ax)
     sns.stripplot(
         data=df,
@@ -133,8 +124,15 @@ def plot_pca_scatter(
     reduced = pca.fit_transform(features)
     var_ratio = pca.explained_variance_ratio_
 
-    fig, ax = plt.subplots()
-    scatter = ax.scatter(reduced[:, 0], reduced[:, 1], c=labels, cmap="tab10", s=20)
+    fig, ax = plt.subplots(figsize=(6, 4))
+    scatter = ax.scatter(
+        reduced[:, 0],
+        reduced[:, 1],
+        c=labels,
+        cmap="tab10",
+        s=20,
+        alpha=0.8,
+    )
     ax.set_title(title)
     ax.set_xlabel(f"PC1 ({var_ratio[0]*100:.1f}% var)")
     ax.set_ylabel(f"PC2 ({var_ratio[1]*100:.1f}% var)")
@@ -181,8 +179,15 @@ def plot_tsne_scatter(
     )
     reduced = tsne.fit_transform(features)
 
-    fig, ax = plt.subplots()
-    scatter = ax.scatter(reduced[:, 0], reduced[:, 1], c=labels, cmap="tab10", s=20)
+    fig, ax = plt.subplots(figsize=(6, 4))
+    scatter = ax.scatter(
+        reduced[:, 0],
+        reduced[:, 1],
+        c=labels,
+        cmap="tab10",
+        s=20,
+        alpha=0.8,
+    )
     ax.set_title(title)
     ax.set_xlabel("t-SNE 1")
     ax.set_ylabel("t-SNE 2")

@@ -12,6 +12,7 @@ Typical usage
 ...     compute_scores,
 ...     cluster_response_rates,
 ...     response_rate_variance,
+...     response_rate_range,
 ...     cluster_response_summary,
 ...     campaign_allocation_lift,
 ...     compute_classification_metrics,
@@ -28,6 +29,7 @@ from .segmentation import (
     cluster_response_rates,
     cluster_response_summary,
     response_rate_variance,
+    response_rate_range,
 )
 
 __all__ = [
@@ -36,6 +38,7 @@ __all__ = [
     "cluster_response_rates",
     "cluster_response_summary",
     "response_rate_variance",
+    "response_rate_range",
     "campaign_allocation_lift",
     "AllocationResult",
 ]

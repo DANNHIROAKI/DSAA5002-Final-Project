@@ -1,4 +1,13 @@
-"""Train and evaluate the Response-Aware Joint Clustering (RAJC) model."""
+"""Train and evaluate the Response-Aware Joint Clustering (RAJC) model.
+
+This script trains a RAJC model (by default the RAJC-v2 "constant_prob"
+variant) on the marketing campaign dataset and evaluates:
+
+- clustering quality (Silhouette / CH / DB),
+- promotion-response segmentation (cluster-wise response rates),
+- per-customer response prediction quality (AUC / F1 / etc.),
+- lift@20% based on predicted response probabilities.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +19,10 @@ from typing import Dict, Tuple, Any, Sequence, Optional
 import pandas as pd
 import yaml
 
-from customer_segmentation.src.data.features import assemble_feature_table
+from customer_segmentation.src.data.features import (
+    assemble_feature_table,
+    split_behavior_and_response_features,
+)
 from customer_segmentation.src.data.load import load_raw_data
 from customer_segmentation.src.data.preprocess import clean_data
 from customer_segmentation.src.evaluation import clustering as clustering_eval
@@ -31,14 +43,26 @@ def _ensure_output_dirs() -> None:
 
 
 def _prepare_features() -> Tuple[pd.DataFrame, pd.Series]:
-    """Load, clean and featurize the dataset."""
+    """Load, clean and featurize the dataset.
+
+    RAJC is intended to cluster primarily on **behavioural** features, so we
+    extract the behaviour subset from the engineered feature table and use it
+    throughout this script.
+    """
     raw = load_raw_data(parse_dates=["Dt_Customer"])
     cleaned = clean_data(raw)
-    features_df, labels, _ = assemble_feature_table(cleaned)
-    return features_df, labels
+    features_df, labels, transformer = assemble_feature_table(cleaned)
+    behavior_features, _ = split_behavior_and_response_features(
+        features_df, transformer
+    )
+    return behavior_features, labels
 
 
-def _evaluate(model: RAJCModel, features: pd.DataFrame, labels: pd.Series) -> Dict[str, Any]:
+def _evaluate(
+    model: RAJCModel,
+    features: pd.DataFrame,
+    labels: pd.Series,
+) -> Dict[str, Any]:
     """Compute clustering, segmentation and prediction metrics for a fitted RAJC model."""
     clusters = model.assignments_
     if clusters is None:
@@ -50,7 +74,13 @@ def _evaluate(model: RAJCModel, features: pd.DataFrame, labels: pd.Series) -> Di
     scores["response_rate_variance"] = segmentation_eval.response_rate_variance(rates)
     scores["response_rates"] = rates.to_dict()
 
-    # Promotion-response prediction metrics (using RAJC's per-cluster classifiers)
+    # Basic config info for traceability
+    scores["n_clusters"] = model.config.n_clusters
+    scores["lambda"] = model.config.lambda_
+    scores["gamma"] = getattr(model.config, "gamma", 0.0)
+    scores["model_type"] = getattr(model.config, "model_type", "constant_prob")
+
+    # Promotion-response prediction metrics (using RAJC's cluster-wise model)
     probas = model.predict_response(features)
     preds = (probas >= 0.5).astype(int)
     scores.update(
@@ -88,13 +118,20 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         sys.exit(1)
 
     rajc_cfg = config_dict.get("rajc", {})
+
     config = RAJCConfig(
         n_clusters=rajc_cfg.get("n_clusters", 4),
         lambda_=rajc_cfg.get("lambda", 1.0),
+        gamma=rajc_cfg.get("gamma", 0.0),
         max_iter=rajc_cfg.get("max_iter", 20),
         tol=float(rajc_cfg.get("tol", 1e-4)),
         random_state=rajc_cfg.get("random_state", 42),
-        logreg_max_iter=rajc_cfg.get("logistic_regression", {}).get("max_iter", 200),
+        smoothing=rajc_cfg.get("smoothing", 1.0),
+        logreg_max_iter=rajc_cfg.get("logistic_regression", {}).get(
+            "max_iter", 200
+        ),
+        kmeans_n_init=rajc_cfg.get("kmeans_n_init", 10),
+        model_type=rajc_cfg.get("model_type", "constant_prob"),
     )
 
     # Prepare data
@@ -127,9 +164,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     logger.info("Saved RAJC metrics to %s", metrics_path)
 
     assignments_path = TABLE_DIR / "rajc_assignments.csv"
-    pd.Series(model.assignments_, index=features.index, name="cluster").to_csv(
-        assignments_path, header=True
-    )
+    # assignments_ is already a Series with aligned index.
+    model.assignments_.to_csv(assignments_path, header=True)
     logger.info("Saved RAJC assignments to %s", assignments_path)
 
 

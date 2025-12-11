@@ -19,7 +19,10 @@ from typing import Dict, Tuple, Any, Sequence, Optional
 import pandas as pd
 import yaml
 
-from customer_segmentation.src.data.features import assemble_feature_table
+from customer_segmentation.src.data.features import (
+    assemble_feature_table,
+    split_behavior_and_response_features,
+)
 from customer_segmentation.src.data.load import load_raw_data
 from customer_segmentation.src.data.preprocess import clean_data
 from customer_segmentation.src.evaluation import clustering as clustering_eval
@@ -48,12 +51,23 @@ def _ensure_output_dirs() -> None:
     FIG_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def _prepare_features() -> Tuple[pd.DataFrame, pd.Series]:
-    """Load raw data, clean it, and build the engineered feature matrix."""
+def _prepare_features() -> Tuple[pd.DataFrame, pd.Series, object]:
+    """Load raw data, clean it, and build the engineered feature matrix.
+
+    Returns
+    -------
+    features_df :
+        Full engineered feature table (behaviour + response-related).
+    labels :
+        Binary promotion-response label.
+    transformer :
+        Fitted ColumnTransformer with attached feature-group metadata, which
+        can be used to derive behaviour-only features for clustering.
+    """
     raw = load_raw_data(parse_dates=["Dt_Customer"])
     cleaned = clean_data(raw)
-    features_df, labels, _ = assemble_feature_table(cleaned)
-    return features_df, labels
+    features_df, labels, transformer = assemble_feature_table(cleaned)
+    return features_df, labels, transformer
 
 
 def _select_rfm_features(features: pd.DataFrame) -> pd.DataFrame:
@@ -80,9 +94,13 @@ def _evaluate_clusters(
     return scores
 
 
-def _run_rfm_kmeans(config: dict, features: pd.DataFrame, labels: pd.Series) -> Dict[str, Any]:
+def _run_rfm_kmeans(
+    config: dict,
+    full_features: pd.DataFrame,
+    labels: pd.Series,
+) -> Dict[str, Any]:
     """Run Baseline 1: K-Means on RFM features."""
-    subset = _select_rfm_features(features)
+    subset = _select_rfm_features(full_features)
     km_config = KMeansConfig(
         n_clusters=config.get("n_clusters", 4),
         init=config.get("init", "k-means++"),
@@ -95,8 +113,12 @@ def _run_rfm_kmeans(config: dict, features: pd.DataFrame, labels: pd.Series) -> 
     return _evaluate_clusters("rfm_kmeans", subset, assignments, labels)
 
 
-def _run_full_kmeans(config: dict, features: pd.DataFrame, labels: pd.Series) -> Dict[str, Any]:
-    """Run Baseline 2: K-Means on full feature set."""
+def _run_full_kmeans(
+    config: dict,
+    behavior_features: pd.DataFrame,
+    labels: pd.Series,
+) -> Dict[str, Any]:
+    """Run Baseline 2: K-Means on full *behavior* feature set."""
     km_config = KMeansConfig(
         n_clusters=config.get("n_clusters", 4),
         init=config.get("init", "k-means++"),
@@ -104,13 +126,17 @@ def _run_full_kmeans(config: dict, features: pd.DataFrame, labels: pd.Series) ->
         random_state=config.get("random_state", 42),
     )
     model = KMeansBaseline(km_config)
-    model.fit(features)
-    assignments = model.predict(features)
-    return _evaluate_clusters("full_kmeans", features, assignments, labels)
+    model.fit(behavior_features)
+    assignments = model.predict(behavior_features)
+    return _evaluate_clusters("full_kmeans", behavior_features, assignments, labels)
 
 
-def _run_gmm(config: dict, features: pd.DataFrame, labels: pd.Series) -> Dict[str, Any]:
-    """Run Baseline 3: Gaussian Mixture Model on full feature set."""
+def _run_gmm(
+    config: dict,
+    behavior_features: pd.DataFrame,
+    labels: pd.Series,
+) -> Dict[str, Any]:
+    """Run Baseline 3: Gaussian Mixture Model on behavioral feature set."""
     gmm_config = GMMConfig(
         n_components=config.get("n_components", 4),
         covariance_type=config.get("covariance_type", "full"),
@@ -118,29 +144,37 @@ def _run_gmm(config: dict, features: pd.DataFrame, labels: pd.Series) -> Dict[st
         random_state=config.get("random_state", 42),
     )
     model = GMMBaseline(gmm_config)
-    model.fit(features)
-    assignments = model.predict(features)
-    return _evaluate_clusters("gmm", features, assignments, labels)
+    model.fit(behavior_features)
+    assignments = model.predict(behavior_features)
+    return _evaluate_clusters("gmm", behavior_features, assignments, labels)
 
 
 def _run_cluster_then_predict(
     config: dict,
-    features: pd.DataFrame,
+    full_features: pd.DataFrame,
     labels: pd.Series,
 ) -> Dict[str, Any]:
-    """Run Baseline 4: cluster-then-predict pipeline."""
+    """Run Baseline 4: cluster-then-predict pipeline.
+
+    Here we let both clustering and per-cluster classifiers see the full
+    engineered feature set for a strong two-stage baseline.
+    """
     ctp_config = ClusterThenPredictConfig(
         n_clusters=config.get("n_clusters", 4),
         random_state=config.get("random_state", 42),
         max_iter=config.get("classifier_params", {}).get("max_iter", 200),
     )
-    kmeans, classifiers, assignments = fit_cluster_then_predict(features, labels, ctp_config)
-    probas, preds = predict_with_clusters(assignments, features, classifiers)
+    kmeans, classifiers, assignments = fit_cluster_then_predict(
+        full_features, labels, ctp_config
+    )
+    probas, preds = predict_with_clusters(assignments, full_features, classifiers)
 
     # Classification metrics
     clf_metrics = prediction_eval.compute_classification_metrics(labels, preds, probas)
     # Clustering + segmentation metrics
-    cluster_metrics = _evaluate_clusters("cluster_then_predict", features, assignments, labels)
+    cluster_metrics = _evaluate_clusters(
+        "cluster_then_predict", full_features, assignments, labels
+    )
 
     # Merge dictionaries (cluster metrics already contain "label").
     cluster_metrics.update(clf_metrics)
@@ -190,7 +224,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     # Prepare features
     try:
-        features, labels = _prepare_features()
+        features_full, labels, transformer = _prepare_features()
     except FileNotFoundError as exc:
         logger.error("%s", exc)
         logger.error(
@@ -199,23 +233,38 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         )
         sys.exit(1)
 
-    logger.info("Running baseline methods on %d samples", len(features))
+    # Behaviour-only features for unsupervised baselines
+    behavior_features, _ = split_behavior_and_response_features(
+        features_full, transformer
+    )
+
+    logger.info(
+        "Running baseline methods on %d samples "
+        "(behavioural feature dim = %d, full feature dim = %d)",
+        len(features_full),
+        behavior_features.shape[1],
+        features_full.shape[1],
+    )
 
     results: list[Dict[str, Any]] = []
 
     # Baseline 1: RFM K-Means
     logger.info("Running RFM K-Means baseline")
-    results.append(_run_rfm_kmeans(configs.get("rfm_kmeans", {}), features, labels))
+    results.append(
+        _run_rfm_kmeans(configs.get("rfm_kmeans", {}), features_full, labels)
+    )
 
-    # Baseline 2: Full-feature K-Means
-    logger.info("Running Full-feature K-Means baseline")
-    results.append(_run_full_kmeans(configs.get("full_kmeans", {}), features, labels))
+    # Baseline 2: Full-feature (behavioural) K-Means
+    logger.info("Running Full-feature K-Means baseline (behavioural features)")
+    results.append(
+        _run_full_kmeans(configs.get("full_kmeans", {}), behavior_features, labels)
+    )
 
     # Baseline 3: GMM
     if not args.skip_gmm:
         logger.info("Running GMM baseline")
         try:
-            results.append(_run_gmm(configs.get("gmm", {}), features, labels))
+            results.append(_run_gmm(configs.get("gmm", {}), behavior_features, labels))
         except Exception as exc:  # pragma: no cover - defensive
             logger.exception("GMM baseline failed: %s", exc)
 
@@ -224,7 +273,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         logger.info("Running Cluster-then-Predict baseline")
         try:
             results.append(
-                _run_cluster_then_predict(configs.get("cluster_then_predict", {}), features, labels)
+                _run_cluster_then_predict(
+                    configs.get("cluster_then_predict", {}), features_full, labels
+                )
             )
         except Exception as exc:  # pragma: no cover - defensive
             logger.exception("Cluster-then-Predict baseline failed: %s", exc)

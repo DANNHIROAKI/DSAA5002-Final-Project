@@ -46,7 +46,9 @@ def compute_classification_metrics(
     dict
         Dictionary with keys:
         ``"auc"``, ``"f1"``, ``"log_loss"``, ``"accuracy"``, ``"precision"``,
-        and ``"recall"``. Some values may be ``None`` if not computable.
+        ``"recall"``, ``"balanced_accuracy"``, ``"specificity"``,
+        ``"support_pos"``, and ``"support_neg"``.
+        Some values may be ``None`` if not computable.
     """
     y_true_arr = _to_1d_array(y_true)
     y_pred_arr = _to_1d_array(y_pred)
@@ -58,9 +60,8 @@ def compute_classification_metrics(
         )
 
     # Optional probability array
-    y_prob_arr: Optional[np.ndarray]
     if y_prob is None:
-        y_prob_arr = None
+        y_prob_arr: Optional[np.ndarray] = None
     else:
         y_prob_arr = _to_1d_array(y_prob)
         if y_prob_arr.shape[0] != y_true_arr.shape[0]:
@@ -81,12 +82,19 @@ def compute_classification_metrics(
         y_true_arr, y_pred_arr, zero_division=0
     )
 
+    # Confusion-matrix-based extras (always 2x2 with labels=[0, 1])
+    cm = metrics.confusion_matrix(y_true_arr, y_pred_arr, labels=[0, 1])
+    tn, fp, fn, tp = cm.ravel()
+    support_neg = tn + fp
+    support_pos = tp + fn
+
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+    balanced_accuracy = 0.5 * (recall + specificity)
+
     # Some metrics may fail (e.g., AUC when only one class present)
-    auc: Optional[float]
-    log_loss: Optional[float]
     if y_prob_arr is None:
-        auc = None
-        log_loss = None
+        auc: Optional[float] = None
+        log_loss: Optional[float] = None
     else:
         try:
             auc = metrics.roc_auc_score(y_true_arr, y_prob_arr)
@@ -105,4 +113,8 @@ def compute_classification_metrics(
         "accuracy": accuracy,
         "precision": precision,
         "recall": recall,
+        "balanced_accuracy": balanced_accuracy,
+        "specificity": specificity,
+        "support_pos": float(support_pos),
+        "support_neg": float(support_neg),
     }

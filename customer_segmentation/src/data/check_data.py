@@ -17,12 +17,17 @@ def dataset_status(
 ) -> Tuple[bool, Path]:
     """Return whether the marketing campaign CSV file exists.
 
-    Args:
-        data_dir: Directory where the raw CSV should live.
-        filename: Name of the CSV file (defaults to ``marketing_campaign.csv``).
+    Parameters
+    ----------
+    data_dir :
+        Directory where the raw CSV should live.
+    filename :
+        Name of the CSV file (defaults to ``marketing_campaign.csv``).
 
-    Returns:
-        Tuple of (exists flag, expected file path).
+    Returns
+    -------
+    (exists, path) :
+        ``exists`` is True if the file is present; ``path`` is the expected location.
     """
     csv_path = data_dir / filename
     return csv_path.is_file(), csv_path
@@ -48,6 +53,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> None:
+    """CLI entry point.
+
+    Examples
+    --------
+    From the project root:
+
+    .. code-block:: bash
+
+        python -m customer_segmentation.src.data.check_data
+    """
     args = _parse_args(argv)
 
     # Make sure the directory exists to give a clear hint to the user.
@@ -60,7 +75,7 @@ def main(argv: list[str] | None = None) -> None:
     else:
         print(
             "❌ Dataset is missing.\n"
-            f"   Expected Kaggle 'Customer Personality Analysis' CSV at:\n"
+            "   Expected Kaggle 'Customer Personality Analysis' CSV at:\n"
             f"   {csv_path}"
         )
 
