@@ -30,8 +30,10 @@ def compute_scores(
         Metrics that cannot be computed (e.g., only one cluster present)
         are set to ``None``.
     """
-    n_samples = int(len(labels))
-    n_clusters = int(labels.nunique())
+    labels_series = labels if isinstance(labels, pd.Series) else pd.Series(labels)
+
+    n_samples = int(len(labels_series))
+    n_clusters = int(labels_series.nunique())
 
     results: Dict[str, Optional[float]] = {
         "n_samples": float(n_samples),
