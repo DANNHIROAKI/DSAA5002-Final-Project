@@ -11,6 +11,7 @@ Outputs are written under ``customer_segmentation/outputs`` for later reporting.
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 from typing import Dict, Tuple
 
 import pandas as pd
@@ -134,7 +135,14 @@ def main() -> None:
     _ensure_output_dirs()
 
     configs = yaml.safe_load(Path("customer_segmentation/configs/baselines.yaml").read_text())
-    features, labels = _prepare_features()
+    try:
+        features, labels = _prepare_features()
+    except FileNotFoundError as exc:
+        logger.error("%s", exc)
+        logger.error(
+            "Run `python -m customer_segmentation.src.data.check_data` to verify dataset placement."
+        )
+        sys.exit(1)
 
     logger.info("Running baseline methods on %d samples", len(features))
 

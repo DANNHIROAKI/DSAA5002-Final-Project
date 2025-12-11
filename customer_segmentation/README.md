@@ -15,6 +15,25 @@ This repository organizes the DSAA5002 final project for response-aware customer
 ## Getting Started
 1. Install dependencies: `pip install -r requirements.txt`.
 2. Place the raw dataset at `data/raw/marketing_campaign.csv`. Run `python -m customer_segmentation.src.data.check_data` to verify presence.
-3. Use scripts under `src/experiments/` to run baselines, RAJC training, and analyses once implemented.
 
-Each Python module currently contains skeleton implementations and docstrings to guide further development.
+## Running experiments
+All entrypoints assume the working directory is the repository root:
+
+- Baselines (RFM/Full K-Means, GMM, Cluster-then-Predict):
+  ```bash
+  python -m customer_segmentation.src.experiments.run_baselines
+  ```
+- Proposed RAJC model:
+  ```bash
+  python -m customer_segmentation.src.experiments.run_rajc
+  ```
+- Ablation over λ and cluster counts:
+  ```bash
+  python -m customer_segmentation.src.experiments.run_ablation
+  ```
+- Downstream promotion-response prediction with cluster IDs:
+  ```bash
+  python -m customer_segmentation.src.experiments.run_downstream
+  ```
+
+Each script will report a clear error if the dataset file is missing and saves tables under `customer_segmentation/outputs/tables/`.

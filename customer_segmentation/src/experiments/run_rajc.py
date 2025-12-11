@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 from typing import Dict, Tuple
 
 import pandas as pd
@@ -64,7 +65,14 @@ def main() -> None:
         logreg_max_iter=rajc_cfg.get("logistic_regression", {}).get("max_iter", 200),
     )
 
-    features, labels = _prepare_features()
+    try:
+        features, labels = _prepare_features()
+    except FileNotFoundError as exc:
+        logger.error("%s", exc)
+        logger.error(
+            "Run `python -m customer_segmentation.src.data.check_data` to verify dataset placement."
+        )
+        sys.exit(1)
     logger.info("Fitting RAJC on %d samples", len(features))
 
     model = RAJCModel(config)

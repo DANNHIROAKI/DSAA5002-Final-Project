@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 from typing import Dict, Tuple
 
 import pandas as pd
@@ -52,7 +53,14 @@ def main() -> None:
     logger = configure_logging()
     _ensure_output_dirs()
 
-    features, responses = _prepare_features()
+    try:
+        features, responses = _prepare_features()
+    except FileNotFoundError as exc:
+        logger.error("%s", exc)
+        logger.error(
+            "Run `python -m customer_segmentation.src.data.check_data` to verify dataset placement."
+        )
+        sys.exit(1)
     train_x, test_x, train_y, test_y = train_test_split(
         features, responses, test_size=0.2, random_state=42, stratify=responses
     )

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 from typing import List
 
 import pandas as pd
@@ -52,7 +53,14 @@ def main() -> None:
     logger = configure_logging()
     _ensure_output_dirs()
 
-    features, labels = _prepare_features()
+    try:
+        features, labels = _prepare_features()
+    except FileNotFoundError as exc:
+        logger.error("%s", exc)
+        logger.error(
+            "Run `python -m customer_segmentation.src.data.check_data` to verify dataset placement."
+        )
+        sys.exit(1)
     logger.info(
         "Running ablations over lambda=%s and K=%s", LAMBDA_GRID, CLUSTER_GRID
     )
