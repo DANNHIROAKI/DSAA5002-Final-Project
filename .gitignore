@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+customer_segmentation/data/raw/marketing_campaign.csv
+customer_segmentation/data/processed/
+customer_segmentation/outputs/
