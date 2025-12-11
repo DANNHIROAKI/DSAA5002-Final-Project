@@ -23,7 +23,7 @@ from .cluster_then_predict import (
     fit_cluster_then_predict,
     predict_with_clusters,
 )
-from .rajc import RAJCConfig, RAJCModel, run_rajc
+from .rajc import RAJCConfig, RAJCModel
 
 __all__ = [
     "KMeansBaseline",
@@ -37,5 +37,4 @@ __all__ = [
     "predict_with_clusters",
     "RAJCConfig",
     "RAJCModel",
-    "run_rajc",
 ]
