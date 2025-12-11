@@ -30,4 +30,12 @@ def load_raw_data(
             f"Expected dataset at {csv_path}. Please place the Kaggle CSV in this location."
         )
 
-    return pd.read_csv(csv_path, parse_dates=parse_dates)
+    try:
+        return pd.read_csv(csv_path, parse_dates=parse_dates)
+    except (ValueError, pd.errors.ParserError):
+        # Some distributions of the marketing dataset are tab- or semicolon-separated
+        # rather than comma-separated. Fallback to delimiter inference when the default
+        # parser cannot honor the requested columns (e.g., parse_dates).
+        return pd.read_csv(
+            csv_path, parse_dates=parse_dates, sep=None, engine="python"
+        )
