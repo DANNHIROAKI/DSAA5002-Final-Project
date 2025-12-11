@@ -144,7 +144,7 @@ def _run_cluster_then_predict(
 
     # Merge dictionaries (cluster metrics already contain "label").
     cluster_metrics.update(clf_metrics)
-    cluster_metrics["inertia"] = float(kmeans.inertia_)
+    cluster_metrics["inertia"] = kmeans.inertia()
     cluster_metrics["lift_top20"] = compute_lift(labels, probas, top_frac=0.2)
     return cluster_metrics
 

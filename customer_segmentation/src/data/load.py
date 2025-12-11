@@ -57,7 +57,9 @@ def load_raw_data(
     # First attempt: default pandas CSV parsing.
     try:
         df = pd.read_csv(csv_path, parse_dates=parse_dates)
-    except ParserError:
+    except (ParserError, ValueError):
+        # ValueError can be raised when ``parse_dates`` columns are not found due to
+        # an unexpected delimiter collapsing the header into a single column.
         df = None
 
     # If parsing failed or produced suspiciously few columns, try auto-detecting the separator.
