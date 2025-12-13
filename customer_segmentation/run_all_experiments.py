@@ -386,9 +386,9 @@ def _prepare_leak_free_train_test(
     x_train_full, y_train, transformer = assemble_feature_table(train_df, label_col=DEFAULT_LABEL_COL)
 
     # Transform test using fitted transformer and the SAME feature names
-    test_arr = transformer.transform(test_df)
-    x_test_full = pd.DataFrame(test_arr, columns=x_train_full.columns, index=test_df.index)
-    y_test = test_df[DEFAULT_LABEL_COL].astype(int)
+    x_test_full, y_test, _ = assemble_feature_table(
+        test_df, label_col=DEFAULT_LABEL_COL, transformer=transformer, fit=False
+    )
 
     # Behaviour-only subset (for clustering/RAJC)
     x_train_beh, _ = split_behavior_and_response_features(x_train_full, transformer)
