@@ -1,32 +1,37 @@
-# Hyper-parameters for baseline models used in the experiments.
-# These are read by `src/experiments/run_baselines.py`.
+# customer_segmentation/configs/baselines.yaml
+# Baseline hyperparameters used by:
+#   python -m customer_segmentation.src.experiments.run_baselines
+# See: customer_segmentation/src/experiments/run_baselines.py
 
 rfm_kmeans:
-  # Baseline B1: RFM-only K-Means
+  # Baseline 1: RFM-only KMeans
   n_clusters: 4
   init: "k-means++"
-  max_iter: 300
+  max_iter: 500
   random_state: 42
+  # Use an integer for broad sklearn compatibility
   n_init: 20
 
 full_kmeans:
-  # Baseline B2: full behavioural-feature K-Means
+  # Baseline 2: KMeans on behaviour-only engineered features
   n_clusters: 4
   init: "k-means++"
-  max_iter: 300
+  max_iter: 500
   random_state: 42
   n_init: 20
 
 gmm:
-  # Baseline B3: Gaussian Mixture Model on behavioural features
-  n_clusters: 4          # mapped to n_components inside GMMConfig
+  # Baseline 3: Gaussian Mixture Model on behaviour-only features
+  n_clusters: 4
   covariance_type: "full"
-  max_iter: 200
+  max_iter: 400
   random_state: 42
 
 cluster_then_predict:
-  # Baseline B4: Cluster-then-Predict pipeline
+  # Baseline 4: cluster-then-predict on full engineered features
   n_clusters: 4
   random_state: 42
-  max_iter: 200          # max_iter for K-Means inside the pipeline
+  # Per-cluster LR iterations
+  max_iter: 800
+  # KMeans init trials in the first stage
   kmeans_n_init: 20

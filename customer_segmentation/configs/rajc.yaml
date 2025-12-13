@@ -1,18 +1,36 @@
-# configs/rajc.yaml
-# RAJC-CP++ 主实验配置
-# 会被 run_rajc.py 读取并传给 RAJCConfig(**config_dict)
+# customer_segmentation/configs/rajc.yaml
+# RAJC hyperparameters used by:
+#   python -m customer_segmentation.src.experiments.run_rajc
+#   python -m customer_segmentation.src.experiments.run_downstream  (loads the same config)
+# See: customer_segmentation/src/experiments/run_rajc.py
 
-n_clusters: 4
-lambda_: 0.3
-gamma: 0.1          # 簇级极化正则（设置为 0 即为基础 RAJC-CP）
-smoothing: 1.0      # Laplace 平滑 alpha
-max_iter: 30
-tol: 0.001
+rajc:
+  # Cluster count (K)
+  n_clusters: 4
 
-random_state: 42
-kmeans_n_init: 20
-logreg_max_iter: 200
+  # Response-awareness strength.
+  # Larger -> more strongly encourages clusters to have consistent response behavior.
+  # NOTE: If you later add PCA / reduce feature scale, you can re-tune this.
+  lambda: 3.0
 
-# 当前实现只支持 "constant_prob"，
-# 如果未来实现 RAJC-L，可将其设为 "logreg"
-model_type: constant_prob
+  # Polarization regularization: encourages p_k away from 0.5 (more "high/low response" segments).
+  gamma: 0.1
+
+  # Laplace smoothing alpha used in p_k estimation.
+  smoothing: 1.0
+
+  # Alternating optimization iterations / stopping rule
+  max_iter: 50
+  tol: 0.001
+
+  # Reproducibility + KMeans init stability
+  random_state: 42
+  kmeans_n_init: 20
+
+  # Current code only supports "constant_prob"
+  model_type: "constant_prob"
+
+  # Reserved for future extension (kept for compatibility with loaders);
+  # current RAJC-CP++ implementation does not use it directly.
+  logistic_regression:
+    max_iter: 800
