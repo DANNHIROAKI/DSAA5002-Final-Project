@@ -188,3 +188,37 @@ Traceback (most recent call last):
 ValueError: columns are missing: {'family_size', 'Monetary', 'Frequency', 'has_child', 'Variety_Index', 'Avg_Basket', 'Spent', 'Online_Intensity', 'Deal_Sensitivity', 'Catalog_Ratio', 'PastAcceptCnt', 'Web_Ratio', 'Store_Ratio', 'EverAccepted'}
 [2025-12-13 09:02:59,438] INFO - run_all - Finished step: Figure generation
 [2025-12-13 09:02:59,438] INFO - run_all - ✅ All selected experiments and plots completed successfully.
+[2025-12-13 09:11:51,952] INFO - run_all - Global log file: /home/dhy/PhD/DSAA5002-Final-Project/customer_segmentation/outputs/logs/run_all.log
+[2025-12-13 09:11:51,952] INFO - run_all - ✅ Found dataset at /home/dhy/PhD/DSAA5002-Final-Project/customer_segmentation/data/raw/marketing_campaign.csv
+[2025-12-13 09:11:53,622] INFO - run_all - Global random seed set to 42
+[2025-12-13 09:11:53,622] INFO - run_all - Planned steps (in order): Baseline clustering -> RAJC main experiment -> Downstream prediction -> RAJC ablation -> Figure generation
+[2025-12-13 09:11:53,622] INFO - run_all - ================================================================================
+[2025-12-13 09:11:53,622] INFO - run_all - Starting step: Baseline clustering
+[2025-12-13 09:11:53,623] INFO - run_all - ================================================================================
+[2025-12-13 09:11:54,578] INFO - run_all - Finished step: Baseline clustering
+[2025-12-13 09:11:54,578] INFO - run_all - ================================================================================
+[2025-12-13 09:11:54,578] INFO - run_all - Starting step: RAJC main experiment
+[2025-12-13 09:11:54,578] INFO - run_all - ================================================================================
+[2025-12-13 09:11:55,147] INFO - run_all - Finished step: RAJC main experiment
+[2025-12-13 09:11:55,147] INFO - run_all - ================================================================================
+[2025-12-13 09:11:55,147] INFO - run_all - Starting step: Downstream prediction
+[2025-12-13 09:11:55,147] INFO - run_all - ================================================================================
+[2025-12-13 09:11:55,955] INFO - run_all - Finished step: Downstream prediction
+[2025-12-13 09:11:55,955] INFO - run_all - ================================================================================
+[2025-12-13 09:11:55,955] INFO - run_all - Starting step: RAJC ablation
+[2025-12-13 09:11:55,955] INFO - run_all - ================================================================================
+[2025-12-13 09:12:14,464] INFO - run_all - Finished step: RAJC ablation
+[2025-12-13 09:12:14,464] INFO - run_all - ================================================================================
+[2025-12-13 09:12:14,464] INFO - run_all - Starting step: Figure generation
+[2025-12-13 09:12:14,464] INFO - run_all - ================================================================================
+[2025-12-13 09:12:14,464] INFO - run_all - Loading data for clustering/profile plotting.
+[2025-12-13 09:12:14,530] INFO - run_all - Generating elbow curve for RFM K-Means baseline.
+[2025-12-13 09:14:23,982] INFO - run_all - Generating PCA scatter for RAJC clusters.
+[2025-12-13 09:14:24,129] INFO - run_all - Generating silhouette distribution for RAJC clusters.
+[2025-12-13 09:14:24,309] INFO - run_all - Generating RAJC cluster centers plot.
+[2025-12-13 09:14:24,471] INFO - run_all - Generating RAJC profile plots (income, RFM, channels, etc.).
+[2025-12-13 09:14:25,493] INFO - run_all - Generating downstream prediction curves (ROC/PR/Calibration/Lift/Threshold).
+[2025-12-13 09:14:25,519] INFO - run_all - Leak-free split: train=1792, test=448, full_dim=39, beh_dim=35
+[2025-12-13 09:14:27,113] INFO - run_all - Saved downstream prediction curves under /home/dhy/PhD/DSAA5002-Final-Project/customer_segmentation/outputs/figures/prediction
+[2025-12-13 09:14:27,113] INFO - run_all - Finished step: Figure generation
+[2025-12-13 09:14:27,113] INFO - run_all - ✅ All selected experiments and plots completed successfully.
