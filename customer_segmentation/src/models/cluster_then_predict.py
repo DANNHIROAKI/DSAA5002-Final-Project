@@ -1,4 +1,15 @@
-"""Two-stage baseline: cluster first, then predict promotion response."""
+"""Two-stage baseline: cluster first, then predict promotion response.
+
+Upgraded behavior
+-----------------
+This baseline now supports using *different* feature tables for:
+- clustering (typically behavior features X_beh)
+- prediction (typically full features X_full)
+
+This is controlled via the optional `cluster_features` argument in
+`fit_cluster_then_predict`. If not provided, it defaults to `features`
+(backward-compatible with the original implementation).
+"""
 
 from __future__ import annotations
 
@@ -55,24 +66,31 @@ def fit_cluster_then_predict(
     features: pd.DataFrame,
     labels: pd.Series,
     config: Optional[ClusterThenPredictConfig] = None,
+    cluster_features: Optional[pd.DataFrame] = None,
 ) -> Tuple[KMeansBaseline, Dict[int, object], pd.Series]:
     """Fit K-Means clustering then per-cluster logistic/constant models.
 
-    For each cluster, a logistic regression is trained if both positive and
-    negative examples are present; otherwise a constant-probability classifier
-    is used instead.
+    Parameters
+    ----------
+    features:
+        Feature table used for per-cluster prediction (typically X_full).
+    labels:
+        Binary labels.
+    cluster_features:
+        Feature table used for clustering (typically X_beh). If None, defaults to `features`.
+        This keeps backward compatibility with the old signature/behavior.
 
     Returns
     -------
     kmeans :
         Fitted KMeansBaseline model.
     classifiers :
-        Mapping from cluster_id to classifier (LogisticRegression or
-        _ConstantProbClassifier).
+        Mapping from cluster_id to classifier (LogisticRegression or _ConstantProbClassifier).
     cluster_assignments :
-        Series of cluster labels for the training data.
+        Series of cluster labels for the training data (based on cluster_features).
     """
     cfg = config or ClusterThenPredictConfig()
+    X_cluster = cluster_features if cluster_features is not None else features
 
     # Use KMeansBaseline directly so that cfg.kmeans_n_init is honoured.
     kmeans_cfg = KMeansConfig(
@@ -80,8 +98,8 @@ def fit_cluster_then_predict(
         random_state=cfg.random_state,
         n_init=cfg.kmeans_n_init,
     )
-    kmeans = KMeansBaseline(kmeans_cfg).fit(features)
-    cluster_assignments = kmeans.predict(features)
+    kmeans = KMeansBaseline(kmeans_cfg).fit(X_cluster)
+    cluster_assignments = kmeans.predict(X_cluster)
 
     classifiers: Dict[int, object] = {}
     for cluster_id in sorted(cluster_assignments.unique()):
@@ -90,7 +108,7 @@ def fit_cluster_then_predict(
             continue
 
         y_cluster = labels.loc[idx]
-        X_cluster = features.loc[idx]
+        X_pred_cluster = features.loc[idx]
 
         # If only one class present, fall back to constant-prob classifier
         if y_cluster.nunique() < 2:
@@ -101,7 +119,7 @@ def fit_cluster_then_predict(
                 max_iter=cfg.max_iter,
                 class_weight="balanced",
             )
-            clf.fit(X_cluster, y_cluster)
+            clf.fit(X_pred_cluster, y_cluster)
 
         classifiers[cluster_id] = clf
 

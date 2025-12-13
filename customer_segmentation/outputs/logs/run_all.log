@@ -143,3 +143,48 @@
 [2025-12-11 21:22:03,805] INFO - run_all - Generating RAJC profile plots (income, RFM, channels, etc.).
 [2025-12-11 21:22:05,548] INFO - run_all - Finished step: Figure generation
 [2025-12-11 21:22:05,548] INFO - run_all - ✅ All selected experiments and plots completed successfully.
+[2025-12-13 09:00:26,054] INFO - run_all - Global log file: /home/dhy/PhD/DSAA5002-Final-Project/customer_segmentation/outputs/logs/run_all.log
+[2025-12-13 09:00:26,054] INFO - run_all - ✅ Found dataset at /home/dhy/PhD/DSAA5002-Final-Project/customer_segmentation/data/raw/marketing_campaign.csv
+[2025-12-13 09:00:27,737] INFO - run_all - Global random seed set to 42
+[2025-12-13 09:00:27,738] INFO - run_all - Planned steps (in order): Baseline clustering -> RAJC main experiment -> Downstream prediction -> RAJC ablation -> Figure generation
+[2025-12-13 09:00:27,738] INFO - run_all - ================================================================================
+[2025-12-13 09:00:27,738] INFO - run_all - Starting step: Baseline clustering
+[2025-12-13 09:00:27,738] INFO - run_all - ================================================================================
+[2025-12-13 09:00:28,612] INFO - run_all - Finished step: Baseline clustering
+[2025-12-13 09:00:28,612] INFO - run_all - ================================================================================
+[2025-12-13 09:00:28,612] INFO - run_all - Starting step: RAJC main experiment
+[2025-12-13 09:00:28,612] INFO - run_all - ================================================================================
+[2025-12-13 09:00:29,176] INFO - run_all - Finished step: RAJC main experiment
+[2025-12-13 09:00:29,176] INFO - run_all - ================================================================================
+[2025-12-13 09:00:29,176] INFO - run_all - Starting step: Downstream prediction
+[2025-12-13 09:00:29,176] INFO - run_all - ================================================================================
+[2025-12-13 09:00:29,996] INFO - run_all - Finished step: Downstream prediction
+[2025-12-13 09:00:29,996] INFO - run_all - ================================================================================
+[2025-12-13 09:00:29,996] INFO - run_all - Starting step: RAJC ablation
+[2025-12-13 09:00:29,996] INFO - run_all - ================================================================================
+[2025-12-13 09:00:47,716] INFO - run_all - Finished step: RAJC ablation
+[2025-12-13 09:00:47,716] INFO - run_all - ================================================================================
+[2025-12-13 09:00:47,716] INFO - run_all - Starting step: Figure generation
+[2025-12-13 09:00:47,716] INFO - run_all - ================================================================================
+[2025-12-13 09:00:47,716] INFO - run_all - Loading data for clustering/profile plotting.
+[2025-12-13 09:00:47,768] INFO - run_all - Generating elbow curve for RFM K-Means baseline.
+[2025-12-13 09:02:57,909] INFO - run_all - Generating PCA scatter for RAJC clusters.
+[2025-12-13 09:02:58,035] INFO - run_all - Generating silhouette distribution for RAJC clusters.
+[2025-12-13 09:02:58,200] INFO - run_all - Generating RAJC cluster centers plot.
+[2025-12-13 09:02:58,359] INFO - run_all - Generating RAJC profile plots (income, RFM, channels, etc.).
+[2025-12-13 09:02:59,421] INFO - run_all - Generating downstream prediction curves (ROC/PR/Calibration/Lift/Threshold).
+[2025-12-13 09:02:59,437] ERROR - run_all - Failed to generate downstream prediction curves: columns are missing: {'family_size', 'Monetary', 'Frequency', 'has_child', 'Variety_Index', 'Avg_Basket', 'Spent', 'Online_Intensity', 'Deal_Sensitivity', 'Catalog_Ratio', 'PastAcceptCnt', 'Web_Ratio', 'Store_Ratio', 'EverAccepted'}
+Traceback (most recent call last):
+  File "/home/dhy/PhD/DSAA5002-Final-Project/customer_segmentation/run_all_experiments.py", line 625, in _generate_plots
+    _generate_downstream_curves(
+  File "/home/dhy/PhD/DSAA5002-Final-Project/customer_segmentation/run_all_experiments.py", line 426, in _generate_downstream_curves
+    x_train_full, x_test_full, y_train, y_test, x_train_beh, x_test_beh = _prepare_leak_free_train_test(
+  File "/home/dhy/PhD/DSAA5002-Final-Project/customer_segmentation/run_all_experiments.py", line 389, in _prepare_leak_free_train_test
+    test_arr = transformer.transform(test_df)
+  File "/home/dhy/anaconda3/envs/BGE/lib/python3.10/site-packages/sklearn/utils/_set_output.py", line 316, in wrapped
+    data_to_wrap = f(self, X, *args, **kwargs)
+  File "/home/dhy/anaconda3/envs/BGE/lib/python3.10/site-packages/sklearn/compose/_column_transformer.py", line 1065, in transform
+    raise ValueError(f"columns are missing: {diff}")
+ValueError: columns are missing: {'family_size', 'Monetary', 'Frequency', 'has_child', 'Variety_Index', 'Avg_Basket', 'Spent', 'Online_Intensity', 'Deal_Sensitivity', 'Catalog_Ratio', 'PastAcceptCnt', 'Web_Ratio', 'Store_Ratio', 'EverAccepted'}
+[2025-12-13 09:02:59,438] INFO - run_all - Finished step: Figure generation
+[2025-12-13 09:02:59,438] INFO - run_all - ✅ All selected experiments and plots completed successfully.

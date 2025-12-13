@@ -1,12 +1,11 @@
-"""Train and evaluate the Response-Aware Joint Clustering (RAJC) model.
+"""Train and evaluate the Response-Aware Joint model under a strict hold-out protocol.
 
-This script trains a RAJC model (by default the RAJC-v2 "constant_prob"
-variant) on the marketing campaign dataset and evaluates:
-
-- clustering quality (Silhouette / CH / DB),
-- promotion-response segmentation (cluster-wise response rates),
-- per-customer response prediction quality (AUC / F1 / etc.),
-- lift@20% based on predicted response probabilities.
+Upgraded behavior vs the previous version:
+- Uses y = Response (label_mode="recent").
+- Uses leakage-free preprocessing (fit on train; transform val/test).
+- Supports RAMoE as the default RAJC model_type ("ramoe").
+- Trains RAJC/RAMoE on behavior features (X_beh) but experts use full features (X_full).
+- Selects a probability threshold on validation (max F1), then reports test metrics.
 """
 
 from __future__ import annotations
@@ -16,15 +15,18 @@ from pathlib import Path
 import sys
 from typing import Dict, Tuple, Any, Sequence, Optional
 
+import numpy as np
 import pandas as pd
 import yaml
+from sklearn.metrics import f1_score
 
 from customer_segmentation.src.data.features import (
+    add_response_label,
     assemble_feature_table,
     split_behavior_and_response_features,
 )
 from customer_segmentation.src.data.load import load_raw_data
-from customer_segmentation.src.data.preprocess import clean_data
+from customer_segmentation.src.data.preprocess import clean_data, train_val_test_split
 from customer_segmentation.src.evaluation import clustering as clustering_eval
 from customer_segmentation.src.evaluation import prediction as prediction_eval
 from customer_segmentation.src.evaluation import segmentation as segmentation_eval
@@ -42,65 +44,166 @@ def _ensure_output_dirs() -> None:
     TABLE_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def _prepare_features() -> Tuple[pd.DataFrame, pd.Series]:
-    """Load, clean and featurize the dataset.
+def _choose_threshold_max_f1(y_true: pd.Series, probas: pd.Series, grid_size: int = 101) -> float:
+    y = y_true.astype(int).to_numpy()
+    p = probas.to_numpy()
+    best_t = 0.5
+    best_f1 = -1.0
+    for t in np.linspace(0.0, 1.0, grid_size):
+        preds = (p >= t).astype(int)
+        score = f1_score(y, preds, zero_division=0)
+        if score > best_f1:
+            best_f1 = score
+            best_t = float(t)
+    return best_t
 
-    RAJC is intended to cluster primarily on **behavioural** features, so we
-    extract the behaviour subset from the engineered feature table and use it
-    throughout this script.
-    """
-    raw = load_raw_data(parse_dates=["Dt_Customer"])
-    cleaned = clean_data(raw)
-    features_df, labels, transformer = assemble_feature_table(cleaned)
-    behavior_features, _ = split_behavior_and_response_features(
-        features_df, transformer
+
+def _load_rajc_config(config_path: Path, logger) -> RAJCConfig:
+    """Load RAJCConfig from YAML with safe defaults."""
+    try:
+        cfg_dict = yaml.safe_load(config_path.read_text()) or {}
+        rajc_cfg = cfg_dict.get("rajc", {})
+    except FileNotFoundError:
+        logger.warning("RAJC config file not found at %s; using defaults.", config_path)
+        rajc_cfg = {}
+
+    lr_cfg = rajc_cfg.get("logistic_regression", {}) or {}
+
+    return RAJCConfig(
+        n_clusters=rajc_cfg.get("n_clusters", 4),
+        lambda_=float(rajc_cfg.get("lambda", 1.0)),
+        gamma=float(rajc_cfg.get("gamma", 0.0)),
+        smoothing=float(rajc_cfg.get("smoothing", 1.0)),
+        max_iter=int(rajc_cfg.get("max_iter", 30)),
+        tol=float(rajc_cfg.get("tol", 1e-3)),
+        random_state=rajc_cfg.get("random_state", 42),
+        kmeans_n_init=int(rajc_cfg.get("kmeans_n_init", 10)),
+        model_type=rajc_cfg.get("model_type", "ramoe"),
+        # RAMoE-specific
+        temperature=float(rajc_cfg.get("temperature", 1.0)),
+        # Expert LR settings
+        logreg_C=float(lr_cfg.get("C", 1.0)),
+        logreg_max_iter=int(lr_cfg.get("max_iter", 200)),
+        logreg_solver=str(lr_cfg.get("solver", "lbfgs")),
     )
-    return behavior_features, labels
 
 
-def _evaluate(
+def _prepare_splits(
+    test_size: float,
+    val_size: float,
+    random_state: int,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    raw = load_raw_data()
+    cleaned = clean_data(raw)
+    cleaned = add_response_label(cleaned, mode="recent")
+
+    train_df, val_df, test_df = train_val_test_split(
+        cleaned,
+        test_size=test_size,
+        val_size=val_size,
+        random_state=random_state,
+        stratify_col="campaign_response",
+    )
+    return train_df, val_df, test_df
+
+
+def _build_features(
+    train_df: pd.DataFrame,
+    val_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+) -> Tuple[
+    pd.DataFrame, pd.Series,
+    pd.DataFrame, pd.Series,
+    pd.DataFrame, pd.Series,
+    pd.DataFrame, pd.DataFrame, pd.DataFrame,
+    object,
+]:
+    X_train_full, y_train, transformer = assemble_feature_table(
+        train_df, fit=True, label_mode="recent"
+    )
+    X_val_full, y_val, _ = assemble_feature_table(
+        val_df, transformer=transformer, fit=False, label_mode="recent"
+    )
+    X_test_full, y_test, _ = assemble_feature_table(
+        test_df, transformer=transformer, fit=False, label_mode="recent"
+    )
+
+    X_train_beh, _ = split_behavior_and_response_features(X_train_full, transformer)
+    X_val_beh, _ = split_behavior_and_response_features(X_val_full, transformer)
+    X_test_beh, _ = split_behavior_and_response_features(X_test_full, transformer)
+
+    return (
+        X_train_full, y_train,
+        X_val_full, y_val,
+        X_test_full, y_test,
+        X_train_beh, X_val_beh, X_test_beh,
+        transformer,
+    )
+
+
+def _evaluate_on_split(
     model: RAJCModel,
-    features: pd.DataFrame,
-    labels: pd.Series,
+    X_beh: pd.DataFrame,
+    X_full: pd.DataFrame,
+    y: pd.Series,
+    threshold: float,
+    split_name: str,
 ) -> Dict[str, Any]:
-    """Compute clustering, segmentation and prediction metrics for a fitted RAJC model."""
-    clusters = model.assignments_
-    if clusters is None:
-        raise ValueError("RAJC model has not been fitted or assignments_ is None.")
+    """Compute clustering + segmentation + prediction metrics on a given split."""
+    clusters = pd.Series(model.predict_clusters(X_beh), index=X_beh.index, name="cluster")
+    probas = pd.Series(
+        model.predict_response(X_beh, full_features=X_full),
+        index=X_beh.index,
+        name="proba",
+    )
+    preds = (probas >= threshold).astype(int)
 
-    # Clustering + segmentation metrics
-    scores = clustering_eval.compute_scores(features, clusters)
-    rates = segmentation_eval.cluster_response_rates(clusters, labels)
+    scores = clustering_eval.compute_scores(X_beh, clusters)
+    rates = segmentation_eval.cluster_response_rates(clusters, y)
     scores["response_rate_variance"] = segmentation_eval.response_rate_variance(rates)
     scores["response_rates"] = rates.to_dict()
 
-    # Basic config info for traceability
+    scores.update(prediction_eval.compute_classification_metrics(y, preds, probas))
+    scores["lift_top20"] = compute_lift(y, probas, top_frac=0.2)
+
+    scores["split"] = split_name
+    scores["threshold"] = float(threshold)
     scores["n_clusters"] = model.config.n_clusters
     scores["lambda"] = model.config.lambda_
     scores["gamma"] = getattr(model.config, "gamma", 0.0)
-    scores["model_type"] = getattr(model.config, "model_type", "constant_prob")
-
-    # Promotion-response prediction metrics (using RAJC's cluster-wise model)
-    probas = model.predict_response(features)
-    preds = (probas >= 0.5).astype(int)
-    scores.update(
-        prediction_eval.compute_classification_metrics(labels, preds, probas)
-    )
-    scores["lift_top20"] = compute_lift(labels, probas, top_frac=0.2)
+    scores["temperature"] = getattr(model.config, "temperature", None)
+    scores["model_type"] = getattr(model.config, "model_type", "ramoe")
     scores["label"] = "rajc"
-
     return scores
 
 
 def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train and evaluate the RAJC model on the marketing dataset."
+        description="Train and evaluate RAJC/RAMoE with strict hold-out evaluation."
     )
     parser.add_argument(
         "--config",
         type=Path,
         default=DEFAULT_CONFIG_PATH,
         help=f"YAML configuration file for RAJC (default: {DEFAULT_CONFIG_PATH})",
+    )
+    parser.add_argument(
+        "--test-size",
+        type=float,
+        default=0.2,
+        help="Test set fraction (default: 0.2).",
+    )
+    parser.add_argument(
+        "--val-size",
+        type=float,
+        default=0.1,
+        help="Validation set fraction (default: 0.1).",
+    )
+    parser.add_argument(
+        "--random-state",
+        type=int,
+        default=42,
+        help="Random seed for split and models (default: 42).",
     )
     return parser.parse_args(argv)
 
@@ -111,32 +214,15 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     args = _parse_args(argv)
 
     # Load configuration
+    config = _load_rajc_config(args.config, logger)
+
+    # Prepare data splits
     try:
-        config_dict = yaml.safe_load(args.config.read_text()) or {}
-    except FileNotFoundError:
-        logger.error("RAJC config file not found at %s", args.config)
-        sys.exit(1)
-
-    rajc_cfg = config_dict.get("rajc", {})
-
-    config = RAJCConfig(
-        n_clusters=rajc_cfg.get("n_clusters", 4),
-        lambda_=rajc_cfg.get("lambda", 1.0),
-        gamma=rajc_cfg.get("gamma", 0.0),
-        max_iter=rajc_cfg.get("max_iter", 20),
-        tol=float(rajc_cfg.get("tol", 1e-4)),
-        random_state=rajc_cfg.get("random_state", 42),
-        smoothing=rajc_cfg.get("smoothing", 1.0),
-        logreg_max_iter=rajc_cfg.get("logistic_regression", {}).get(
-            "max_iter", 200
-        ),
-        kmeans_n_init=rajc_cfg.get("kmeans_n_init", 10),
-        model_type=rajc_cfg.get("model_type", "constant_prob"),
-    )
-
-    # Prepare data
-    try:
-        features, labels = _prepare_features()
+        train_df, val_df, test_df = _prepare_splits(
+            test_size=args.test_size,
+            val_size=args.val_size,
+            random_state=args.random_state,
+        )
     except FileNotFoundError as exc:
         logger.error("%s", exc)
         logger.error(
@@ -145,30 +231,60 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         )
         sys.exit(1)
 
+    # Features (fit on train only)
+    (
+        X_train_full, y_train,
+        X_val_full, y_val,
+        X_test_full, y_test,
+        X_train_beh, X_val_beh, X_test_beh,
+        _,
+    ) = _build_features(train_df, val_df, test_df)
+
     logger.info(
-        "Fitting RAJC on %d samples with config: %s",
-        len(features),
+        "Split sizes: train=%d, val=%d, test=%d",
+        len(train_df), len(val_df), len(test_df),
+    )
+    logger.info(
+        "Fitting RAJC/RAMoE with config: %s",
         config,
     )
 
-    # Fit RAJC
+    # Fit model (RAMoE requires full_features)
     model = RAJCModel(config)
-    model.fit(features, labels)
+    model.fit(X_train_beh, y_train, full_features=X_train_full)
+
+    # Choose threshold on validation
+    probas_val = pd.Series(
+        model.predict_response(X_val_beh, full_features=X_val_full),
+        index=X_val_beh.index,
+    )
+    threshold = _choose_threshold_max_f1(y_val, probas_val)
 
     # Evaluate
-    metrics = _evaluate(model, features, labels)
+    val_metrics = _evaluate_on_split(
+        model, X_val_beh, X_val_full, y_val, threshold, split_name="val"
+    )
+    test_metrics = _evaluate_on_split(
+        model, X_test_beh, X_test_full, y_test, threshold, split_name="test"
+    )
 
-    metrics_df = pd.DataFrame([metrics])
+    metrics_df = pd.DataFrame([val_metrics, test_metrics])
     metrics_path = TABLE_DIR / "rajc_metrics.csv"
     metrics_df.to_csv(metrics_path, index=False)
     logger.info("Saved RAJC metrics to %s", metrics_path)
 
-    assignments_path = TABLE_DIR / "rajc_assignments.csv"
-    assignments_series = pd.Series(
-        model.assignments_, index=features.index, name="cluster"
+    # Save train assignments and test predicted clusters for reporting
+    train_assignments_path = TABLE_DIR / "rajc_assignments_train.csv"
+    pd.Series(model.assignments_, index=X_train_beh.index, name="cluster").to_csv(
+        train_assignments_path, header=True
     )
-    assignments_series.to_csv(assignments_path, header=True)
-    logger.info("Saved RAJC assignments to %s", assignments_path)
+    logger.info("Saved train cluster assignments to %s", train_assignments_path)
+
+    test_clusters_path = TABLE_DIR / "rajc_clusters_test.csv"
+    pd.Series(model.predict_clusters(X_test_beh), index=X_test_beh.index, name="cluster").to_csv(
+        test_clusters_path, header=True
+    )
+    logger.info("Saved test cluster predictions to %s", test_clusters_path)
 
 
 if __name__ == "__main__":

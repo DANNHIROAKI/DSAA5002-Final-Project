@@ -46,6 +46,12 @@ class GMMBaseline:
         labels = self.model.predict(features)
         return pd.Series(labels, index=features.index, name="cluster")
 
+    def predict_proba(self, features: pd.DataFrame) -> np.ndarray:
+        """Posterior responsibilities for each component (n_samples, n_components)."""
+        if self.model is None:
+            raise ValueError("Model has not been fitted yet.")
+        return self.model.predict_proba(features)
+
     def silhouette(self, features: pd.DataFrame) -> float:
         """Silhouette score for current GMM clustering (nan if undefined)."""
         if self.model is None:

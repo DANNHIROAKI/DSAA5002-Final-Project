@@ -15,20 +15,7 @@ def dataset_status(
     data_dir: Path = DEFAULT_DATA_DIR,
     filename: str = DEFAULT_FILENAME,
 ) -> Tuple[bool, Path]:
-    """Return whether the marketing campaign CSV file exists.
-
-    Parameters
-    ----------
-    data_dir :
-        Directory where the raw CSV should live.
-    filename :
-        Name of the CSV file (defaults to ``marketing_campaign.csv``).
-
-    Returns
-    -------
-    (exists, path) :
-        ``exists`` is True if the file is present; ``path`` is the expected location.
-    """
+    """Return whether the marketing campaign CSV file exists."""
     csv_path = data_dir / filename
     return csv_path.is_file(), csv_path
 

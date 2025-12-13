@@ -1,12 +1,18 @@
-"""Run baseline clustering pipelines and log metrics.
+"""Run baseline clustering/prediction pipelines under a strict hold-out protocol.
 
-This script executes the baseline methods described in the methodology:
-- RFM K-Means (Baseline 1)
-- Full-feature K-Means (Baseline 2)
-- Gaussian Mixture Model (Baseline 3)
-- Cluster-then-Predict (Baseline 4)
+Baselines implemented (aligned with the methodology):
+- B1: RFM K-Means
+- B2: Behavior K-Means
+- B3: GMM on behavior features
+- B4: Cluster-then-Predict (behavior clustering -> per-cluster supervised predictor)
 
-Outputs are written under ``customer_segmentation/outputs`` for later reporting.
+Key upgrades vs the previous script:
+- Uses y = Response (label_mode="recent").
+- Uses train/val/test split with leakage-free preprocessing:
+  fit transformer on train only, then transform val/test.
+- Cluster-then-Predict is made fair: clustering uses behavior features,
+  but prediction uses full features.
+- Uses validation to choose a decision threshold (max F1) for supervised baselines.
 """
 
 from __future__ import annotations
@@ -16,15 +22,18 @@ from pathlib import Path
 import sys
 from typing import Dict, Tuple, Any, Sequence, Optional
 
+import numpy as np
 import pandas as pd
 import yaml
+from sklearn.metrics import f1_score
 
 from customer_segmentation.src.data.features import (
+    add_response_label,
     assemble_feature_table,
     split_behavior_and_response_features,
 )
 from customer_segmentation.src.data.load import load_raw_data
-from customer_segmentation.src.data.preprocess import clean_data
+from customer_segmentation.src.data.preprocess import clean_data, train_val_test_split
 from customer_segmentation.src.evaluation import clustering as clustering_eval
 from customer_segmentation.src.evaluation import prediction as prediction_eval
 from customer_segmentation.src.evaluation import segmentation as segmentation_eval
@@ -51,28 +60,82 @@ def _ensure_output_dirs() -> None:
     FIG_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def _prepare_features() -> Tuple[pd.DataFrame, pd.Series, object]:
-    """Load raw data, clean it, and build the engineered feature matrix.
+def _choose_threshold_max_f1(y_true: pd.Series, probas: pd.Series, grid_size: int = 101) -> float:
+    """Choose a probability threshold on validation set to maximize F1."""
+    y = y_true.astype(int).to_numpy()
+    p = probas.to_numpy()
+    best_t = 0.5
+    best_f1 = -1.0
 
-    Returns
-    -------
-    features_df :
-        Full engineered feature table (behaviour + response-related).
-    labels :
-        Binary promotion-response label.
-    transformer :
-        Fitted ColumnTransformer with attached feature-group metadata, which
-        can be used to derive behaviour-only features for clustering.
-    """
-    raw = load_raw_data(parse_dates=["Dt_Customer"])
+    for t in np.linspace(0.0, 1.0, grid_size):
+        preds = (p >= t).astype(int)
+        score = f1_score(y, preds, zero_division=0)
+        if score > best_f1:
+            best_f1 = score
+            best_t = float(t)
+
+    return best_t
+
+
+def _load_and_split_data(
+    test_size: float,
+    val_size: float,
+    random_state: int,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Load raw dataset, clean it, create y=Response label, then split."""
+    raw = load_raw_data()
     cleaned = clean_data(raw)
-    features_df, labels, transformer = assemble_feature_table(cleaned)
-    return features_df, labels, transformer
+
+    # Add y = Response (recent label) for stratified splitting.
+    cleaned = add_response_label(cleaned, mode="recent")
+    train_df, val_df, test_df = train_val_test_split(
+        cleaned,
+        test_size=test_size,
+        val_size=val_size,
+        random_state=random_state,
+        stratify_col="campaign_response",
+    )
+    return train_df, val_df, test_df
+
+
+def _build_features(
+    train_df: pd.DataFrame,
+    val_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+) -> Tuple[
+    pd.DataFrame, pd.Series,
+    pd.DataFrame, pd.Series,
+    pd.DataFrame, pd.Series,
+    pd.DataFrame, pd.DataFrame, pd.DataFrame,
+    object
+]:
+    """Fit feature transformer on train; transform val/test; split behavior subset."""
+    X_train_full, y_train, transformer = assemble_feature_table(
+        train_df, fit=True, label_mode="recent"
+    )
+    X_val_full, y_val, _ = assemble_feature_table(
+        val_df, transformer=transformer, fit=False, label_mode="recent"
+    )
+    X_test_full, y_test, _ = assemble_feature_table(
+        test_df, transformer=transformer, fit=False, label_mode="recent"
+    )
+
+    X_train_beh, _ = split_behavior_and_response_features(X_train_full, transformer)
+    X_val_beh, _ = split_behavior_and_response_features(X_val_full, transformer)
+    X_test_beh, _ = split_behavior_and_response_features(X_test_full, transformer)
+
+    return (
+        X_train_full, y_train,
+        X_val_full, y_val,
+        X_test_full, y_test,
+        X_train_beh, X_val_beh, X_test_beh,
+        transformer,
+    )
 
 
 def _select_rfm_features(features: pd.DataFrame) -> pd.DataFrame:
-    """Select the RFM subset of engineered features for Baseline 1."""
-    cols = [col for col in ["recency", "frequency", "monetary"] if col in features.columns]
+    """Select the RFM subset (recency/frequency/monetary) from engineered features."""
+    cols = [c for c in ["recency", "frequency", "monetary"] if c in features.columns]
     if not cols:
         raise ValueError("RFM columns are missing from engineered features.")
     return features[cols]
@@ -96,11 +159,14 @@ def _evaluate_clusters(
 
 def _run_rfm_kmeans(
     config: dict,
-    full_features: pd.DataFrame,
-    labels: pd.Series,
+    X_train_full: pd.DataFrame,
+    X_test_full: pd.DataFrame,
+    y_test: pd.Series,
 ) -> Dict[str, Any]:
-    """Run Baseline 1: RFM-only K-Means."""
-    subset = _select_rfm_features(full_features)
+    """Baseline 1: RFM-only K-Means (fit on train, evaluate on test)."""
+    train_rfm = _select_rfm_features(X_train_full)
+    test_rfm = _select_rfm_features(X_test_full)
+
     km_config = KMeansConfig(
         n_clusters=config.get("n_clusters", 4),
         init=config.get("init", "k-means++"),
@@ -109,17 +175,22 @@ def _run_rfm_kmeans(
         n_init=config.get("n_init", 10),
     )
     model = KMeansBaseline(km_config)
-    model.fit(subset)
-    assignments = model.predict(subset)
-    return _evaluate_clusters("rfm_kmeans", subset, assignments, labels)
+    model.fit(train_rfm)
+    assignments_test = model.predict(test_rfm)
+
+    metrics = _evaluate_clusters("rfm_kmeans", test_rfm, assignments_test, y_test)
+    metrics["inertia"] = model.inertia()
+    metrics["n_clusters"] = km_config.n_clusters
+    return metrics
 
 
 def _run_full_kmeans(
     config: dict,
-    behavior_features: pd.DataFrame,
-    labels: pd.Series,
+    X_train_beh: pd.DataFrame,
+    X_test_beh: pd.DataFrame,
+    y_test: pd.Series,
 ) -> Dict[str, Any]:
-    """Run Baseline 2: full behavioural-feature K-Means."""
+    """Baseline 2: behavior-feature K-Means (fit on train, evaluate on test)."""
     km_config = KMeansConfig(
         n_clusters=config.get("n_clusters", 4),
         init=config.get("init", "k-means++"),
@@ -128,17 +199,22 @@ def _run_full_kmeans(
         n_init=config.get("n_init", 10),
     )
     model = KMeansBaseline(km_config)
-    model.fit(behavior_features)
-    assignments = model.predict(behavior_features)
-    return _evaluate_clusters("full_kmeans", behavior_features, assignments, labels)
+    model.fit(X_train_beh)
+    assignments_test = model.predict(X_test_beh)
+
+    metrics = _evaluate_clusters("full_kmeans", X_test_beh, assignments_test, y_test)
+    metrics["inertia"] = model.inertia()
+    metrics["n_clusters"] = km_config.n_clusters
+    return metrics
 
 
 def _run_gmm(
     config: dict,
-    behavior_features: pd.DataFrame,
-    labels: pd.Series,
+    X_train_beh: pd.DataFrame,
+    X_test_beh: pd.DataFrame,
+    y_test: pd.Series,
 ) -> Dict[str, Any]:
-    """Run Baseline 3: Gaussian Mixture Model on behavioral feature set."""
+    """Baseline 3: GMM on behavior features (fit on train, evaluate on test)."""
     gmm_config = GMMConfig(
         n_components=config.get("n_clusters", 4),
         covariance_type=config.get("covariance_type", "full"),
@@ -146,56 +222,98 @@ def _run_gmm(
         random_state=config.get("random_state", 42),
     )
     model = GMMBaseline(gmm_config)
-    model.fit(behavior_features)
-    assignments = model.predict(behavior_features)
-    return _evaluate_clusters("gmm", behavior_features, assignments, labels)
+    model.fit(X_train_beh)
+    assignments_test = model.predict(X_test_beh)
+
+    metrics = _evaluate_clusters("gmm", X_test_beh, assignments_test, y_test)
+    metrics["n_clusters"] = gmm_config.n_components
+    return metrics
 
 
 def _run_cluster_then_predict(
     config: dict,
-    full_features: pd.DataFrame,
-    labels: pd.Series,
+    X_train_full: pd.DataFrame,
+    X_train_beh: pd.DataFrame,
+    y_train: pd.Series,
+    X_val_full: pd.DataFrame,
+    X_val_beh: pd.DataFrame,
+    y_val: pd.Series,
+    X_test_full: pd.DataFrame,
+    X_test_beh: pd.DataFrame,
+    y_test: pd.Series,
 ) -> Dict[str, Any]:
-    """Run Baseline 4: cluster-then-predict pipeline.
-
-    Here we let both clustering and per-cluster classifiers see the full
-    engineered feature set for a strong two-stage baseline.
-    """
+    """Baseline 4: Cluster-then-Predict (behavior clustering -> full-feature prediction)."""
     ctp_config = ClusterThenPredictConfig(
         n_clusters=config.get("n_clusters", 4),
         random_state=config.get("random_state", 42),
         max_iter=config.get("max_iter", 200),
         kmeans_n_init=config.get("kmeans_n_init", 10),
     )
-    kmeans, classifiers, assignments = fit_cluster_then_predict(
-        full_features, labels, ctp_config
-    )
-    probas, preds = predict_with_clusters(assignments, full_features, classifiers)
 
-    # Classification metrics
-    clf_metrics = prediction_eval.compute_classification_metrics(labels, preds, probas)
-    # Clustering + segmentation metrics
+    kmeans, classifiers, _ = fit_cluster_then_predict(
+        features=X_train_full,
+        labels=y_train,
+        config=ctp_config,
+        cluster_features=X_train_beh,   # <- IMPORTANT: cluster on behavior only
+    )
+
+    # Choose threshold on validation
+    val_clusters = kmeans.predict(X_val_beh)
+    probas_val, _ = predict_with_clusters(val_clusters, X_val_full, classifiers)
+    threshold = _choose_threshold_max_f1(y_val, probas_val)
+
+    # Evaluate on test
+    test_clusters = kmeans.predict(X_test_beh)
+    probas_test, _ = predict_with_clusters(test_clusters, X_test_full, classifiers)
+    preds_test = (probas_test >= threshold).astype(int)
+
+    clf_metrics = prediction_eval.compute_classification_metrics(
+        y_test, preds_test, probas_test
+    )
+
     cluster_metrics = _evaluate_clusters(
-        "cluster_then_predict", full_features, assignments, labels
+        "cluster_then_predict",
+        X_test_beh,
+        test_clusters,
+        y_test,
     )
 
-    # Merge dictionaries (cluster metrics already contain "label").
     cluster_metrics.update(clf_metrics)
     cluster_metrics["inertia"] = kmeans.inertia()
-    cluster_metrics["lift_top20"] = compute_lift(labels, probas, top_frac=0.2)
+    cluster_metrics["lift_top20"] = compute_lift(y_test, probas_test, top_frac=0.2)
+    cluster_metrics["threshold"] = threshold
+    cluster_metrics["n_clusters"] = ctp_config.n_clusters
     return cluster_metrics
 
 
 def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     """Parse command-line arguments for baseline experiments."""
     parser = argparse.ArgumentParser(
-        description="Run baseline clustering methods for DSAA5002 final project."
+        description="Run baseline methods under strict hold-out evaluation."
     )
     parser.add_argument(
         "--config",
         type=Path,
         default=DEFAULT_CONFIG_PATH,
         help=f"YAML config for baselines (default: {DEFAULT_CONFIG_PATH})",
+    )
+    parser.add_argument(
+        "--test-size",
+        type=float,
+        default=0.2,
+        help="Test set fraction (default: 0.2).",
+    )
+    parser.add_argument(
+        "--val-size",
+        type=float,
+        default=0.1,
+        help="Validation set fraction (default: 0.1).",
+    )
+    parser.add_argument(
+        "--random-state",
+        type=int,
+        default=42,
+        help="Random seed for splitting and models (default: 42).",
     )
     parser.add_argument(
         "--skip-gmm",
@@ -215,16 +333,20 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     _ensure_output_dirs()
     args = _parse_args(argv)
 
-    # Read config
+    # Read baseline config
     try:
         configs = yaml.safe_load(args.config.read_text()) or {}
     except FileNotFoundError:
         logger.error("Baseline config file not found at %s", args.config)
         sys.exit(1)
 
-    # Prepare features
+    # Load & split data
     try:
-        features_full, labels, transformer = _prepare_features()
+        train_df, val_df, test_df = _load_and_split_data(
+            test_size=args.test_size,
+            val_size=args.val_size,
+            random_state=args.random_state,
+        )
     except FileNotFoundError as exc:
         logger.error("%s", exc)
         logger.error(
@@ -233,53 +355,62 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         )
         sys.exit(1)
 
-    # Behaviour-only subset for clustering-oriented baselines
-    behavior_features, _ = split_behavior_and_response_features(
-        features_full, transformer
-    )
+    # Build features (leakage-free)
+    (
+        X_train_full, y_train,
+        X_val_full, y_val,
+        X_test_full, y_test,
+        X_train_beh, X_val_beh, X_test_beh,
+        _,
+    ) = _build_features(train_df, val_df, test_df)
 
     logger.info(
-        "Running baseline methods on %d samples "
-        "(behavioural feature dim = %d, full feature dim = %d)",
-        features_full.shape[0],
-        behavior_features.shape[1],
-        features_full.shape[1],
+        "Baseline evaluation split sizes: train=%d, val=%d, test=%d",
+        len(train_df), len(val_df), len(test_df),
+    )
+    logger.info(
+        "Feature dims: behavior=%d, full=%d",
+        X_train_beh.shape[1],
+        X_train_full.shape[1],
     )
 
     results: list[Dict[str, Any]] = []
 
-    # Baseline 1: RFM K-Means
-    logger.info("Running RFM K-Means baseline")
+    # B1: RFM K-Means
+    logger.info("Running Baseline 1: RFM K-Means")
     results.append(
-        _run_rfm_kmeans(configs.get("rfm_kmeans", {}), features_full, labels)
+        _run_rfm_kmeans(configs.get("rfm_kmeans", {}), X_train_full, X_test_full, y_test)
     )
 
-    # Baseline 2: Full-feature (behavioural) K-Means
-    logger.info("Running Full-feature K-Means baseline (behavioural features)")
+    # B2: behavior K-Means
+    logger.info("Running Baseline 2: Behavior K-Means")
     results.append(
-        _run_full_kmeans(configs.get("full_kmeans", {}), behavior_features, labels)
+        _run_full_kmeans(configs.get("full_kmeans", {}), X_train_beh, X_test_beh, y_test)
     )
 
-    # Baseline 3: GMM
+    # B3: GMM
     if not args.skip_gmm:
-        logger.info("Running GMM baseline")
+        logger.info("Running Baseline 3: GMM")
         try:
             results.append(
-                _run_gmm(configs.get("gmm", {}), behavior_features, labels)
+                _run_gmm(configs.get("gmm", {}), X_train_beh, X_test_beh, y_test)
             )
-        except Exception as exc:  # pragma: no cover - defensive
+        except Exception as exc:  # pragma: no cover
             logger.exception("GMM baseline failed: %s", exc)
 
-    # Baseline 4: Cluster-then-Predict
+    # B4: Cluster-then-Predict
     if not args.skip_ctp:
-        logger.info("Running Cluster-then-Predict baseline")
+        logger.info("Running Baseline 4: Cluster-then-Predict")
         try:
             results.append(
                 _run_cluster_then_predict(
-                    configs.get("cluster_then_predict", {}), features_full, labels
+                    configs.get("cluster_then_predict", {}),
+                    X_train_full, X_train_beh, y_train,
+                    X_val_full, X_val_beh, y_val,
+                    X_test_full, X_test_beh, y_test,
                 )
             )
-        except Exception as exc:  # pragma: no cover - defensive
+        except Exception as exc:  # pragma: no cover
             logger.exception("Cluster-then-Predict baseline failed: %s", exc)
 
     results_df = pd.DataFrame(results)
