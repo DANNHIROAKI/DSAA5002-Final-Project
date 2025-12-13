@@ -222,3 +222,37 @@ ValueError: columns are missing: {'family_size', 'Monetary', 'Frequency', 'has_c
 [2025-12-13 09:14:27,113] INFO - run_all - Saved downstream prediction curves under /home/dhy/PhD/DSAA5002-Final-Project/customer_segmentation/outputs/figures/prediction
 [2025-12-13 09:14:27,113] INFO - run_all - Finished step: Figure generation
 [2025-12-13 09:14:27,113] INFO - run_all - ✅ All selected experiments and plots completed successfully.
+[2025-12-13 10:16:20,037] INFO - run_all - Global log file: /home/dhy/PhD/DSAA5002-Final-Project/customer_segmentation/outputs/logs/run_all.log
+[2025-12-13 10:16:20,037] INFO - run_all - ✅ Found dataset at /home/dhy/PhD/DSAA5002-Final-Project/customer_segmentation/data/raw/marketing_campaign.csv
+[2025-12-13 10:16:21,717] INFO - run_all - Global random seed set to 42
+[2025-12-13 10:16:21,717] INFO - run_all - Planned steps (in order): Baseline clustering -> RAJC main experiment -> Downstream prediction -> RAJC ablation -> Figure generation
+[2025-12-13 10:16:21,717] INFO - run_all - ================================================================================
+[2025-12-13 10:16:21,717] INFO - run_all - Starting step: Baseline clustering
+[2025-12-13 10:16:21,717] INFO - run_all - ================================================================================
+[2025-12-13 10:16:22,656] INFO - run_all - Finished step: Baseline clustering
+[2025-12-13 10:16:22,656] INFO - run_all - ================================================================================
+[2025-12-13 10:16:22,657] INFO - run_all - Starting step: RAJC main experiment
+[2025-12-13 10:16:22,657] INFO - run_all - ================================================================================
+[2025-12-13 10:16:22,919] INFO - run_all - Finished step: RAJC main experiment
+[2025-12-13 10:16:22,919] INFO - run_all - ================================================================================
+[2025-12-13 10:16:22,919] INFO - run_all - Starting step: Downstream prediction
+[2025-12-13 10:16:22,919] INFO - run_all - ================================================================================
+[2025-12-13 10:16:23,381] INFO - run_all - Finished step: Downstream prediction
+[2025-12-13 10:16:23,381] INFO - run_all - ================================================================================
+[2025-12-13 10:16:23,381] INFO - run_all - Starting step: RAJC ablation
+[2025-12-13 10:16:23,381] INFO - run_all - ================================================================================
+[2025-12-13 10:16:41,234] INFO - run_all - Finished step: RAJC ablation
+[2025-12-13 10:16:41,234] INFO - run_all - ================================================================================
+[2025-12-13 10:16:41,234] INFO - run_all - Starting step: Figure generation
+[2025-12-13 10:16:41,234] INFO - run_all - ================================================================================
+[2025-12-13 10:16:41,234] INFO - run_all - Loading data for clustering/profile plotting.
+[2025-12-13 10:16:41,287] INFO - run_all - Generating elbow curve for RFM K-Means baseline.
+[2025-12-13 10:18:52,654] INFO - run_all - Generating PCA scatter for RAJC clusters.
+[2025-12-13 10:18:52,803] INFO - run_all - Generating silhouette distribution for RAJC clusters.
+[2025-12-13 10:18:52,995] INFO - run_all - Generating RAJC cluster centers plot.
+[2025-12-13 10:18:53,159] INFO - run_all - Generating RAJC profile plots (income, RFM, channels, etc.).
+[2025-12-13 10:18:54,222] INFO - run_all - Generating downstream prediction curves (ROC/PR/Calibration/Lift/Threshold).
+[2025-12-13 10:18:54,247] INFO - run_all - Leak-free split: train=1792, test=448, full_dim=39, beh_dim=35
+[2025-12-13 10:18:56,068] INFO - run_all - Saved downstream prediction curves under /home/dhy/PhD/DSAA5002-Final-Project/customer_segmentation/outputs/figures/prediction
+[2025-12-13 10:18:56,068] INFO - run_all - Finished step: Figure generation
+[2025-12-13 10:18:56,068] INFO - run_all - ✅ All selected experiments and plots completed successfully.
