@@ -256,3 +256,25 @@ ValueError: columns are missing: {'family_size', 'Monetary', 'Frequency', 'has_c
 [2025-12-13 10:18:56,068] INFO - run_all - Saved downstream prediction curves under /home/dhy/PhD/DSAA5002-Final-Project/customer_segmentation/outputs/figures/prediction
 [2025-12-13 10:18:56,068] INFO - run_all - Finished step: Figure generation
 [2025-12-13 10:18:56,068] INFO - run_all - ✅ All selected experiments and plots completed successfully.
+[2025-12-14 01:44:56,143] INFO - run_all - Found dataset at /home/dhy/PhD/DSAA5002-Final-Project/customer_segmentation/data/raw/marketing_campaign.csv
+[2025-12-14 01:44:56,143] INFO - run_all - 
+===== Running: Baselines =====
+[2025-12-14 01:44:57,018] INFO - run_all - ✅ Completed: Baselines
+[2025-12-14 01:44:57,018] INFO - run_all - 
+===== Running: RAJC / RAMoE =====
+[2025-12-14 01:45:02,941] INFO - run_all - ✅ Completed: RAJC / RAMoE
+[2025-12-14 01:45:02,941] INFO - run_all - 
+===== Running: Downstream =====
+[2025-12-14 01:45:10,031] INFO - run_all - ✅ Completed: Downstream
+[2025-12-14 01:45:10,032] INFO - run_all - 
+===== Running: Ablation =====
+[2025-12-14 01:51:57,228] INFO - run_all - ✅ Completed: Ablation
+[2025-12-14 01:51:57,229] INFO - run_all - 
+===== Generating figures =====
+[2025-12-14 01:51:57,651] INFO - run_all - Saved baseline elbow plot.
+[2025-12-14 01:51:58,289] INFO - run_all - Saved RAMoE clustering plots.
+[2025-12-14 01:51:58,804] WARNING - run_all - Failed to generate profile plots: plot_rfm_boxplots() got an unexpected keyword argument 'title'
+[2025-12-14 01:52:10,748] INFO - run_all - Saved downstream prediction curves.
+[2025-12-14 01:52:10,748] INFO - run_all - ✅ Figures generated under /home/dhy/PhD/DSAA5002-Final-Project/customer_segmentation/outputs/figures
+[2025-12-14 01:52:10,748] INFO - run_all - 
+All done.
