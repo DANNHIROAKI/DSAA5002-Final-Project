@@ -1,37 +1,37 @@
-# customer_segmentation/configs/baselines.yaml
-# Baseline hyperparameters used by:
+# Baseline configurations used by:
 #   python -m customer_segmentation.src.experiments.run_baselines
-# See: customer_segmentation/src/experiments/run_baselines.py
+#
+# Notes
+# -----
+# - These are *unsupervised* or weakly-supervised segmentation baselines.
+# - The evaluation scripts split the raw rows first, then fit preprocessing only on the train split.
+# - Cluster-then-Predict uses behaviour features for clustering and full features for the per-cluster classifier.
 
 rfm_kmeans:
-  # Baseline 1: RFM-only KMeans
   n_clusters: 4
-  init: "k-means++"
+  init: k-means++
   max_iter: 500
+  n_init: 30
   random_state: 42
-  # Use an integer for broad sklearn compatibility
-  n_init: 20
 
 full_kmeans:
-  # Baseline 2: KMeans on behaviour-only engineered features
   n_clusters: 4
-  init: "k-means++"
+  init: k-means++
   max_iter: 500
+  n_init: 30
   random_state: 42
-  n_init: 20
 
 gmm:
-  # Baseline 3: Gaussian Mixture Model on behaviour-only features
+  # GMM is fit on behaviour features (after preprocessing)
   n_clusters: 4
-  covariance_type: "full"
+  covariance_type: full
   max_iter: 400
   random_state: 42
 
 cluster_then_predict:
-  # Baseline 4: cluster-then-predict on full engineered features
+  # Stage 1: KMeans on behaviour features
   n_clusters: 4
+  kmeans_n_init: 30
+  # Stage 2: per-cluster classifier (LogReg / HGBDT depending on implementation)
+  max_iter: 1200
   random_state: 42
-  # Per-cluster LR iterations
-  max_iter: 800
-  # KMeans init trials in the first stage
-  kmeans_n_init: 20

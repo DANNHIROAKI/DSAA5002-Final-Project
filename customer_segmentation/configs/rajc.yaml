@@ -1,36 +1,87 @@
-# customer_segmentation/configs/rajc.yaml
-# RAJC hyperparameters used by:
+# Proposed method configuration used by:
 #   python -m customer_segmentation.src.experiments.run_rajc
-#   python -m customer_segmentation.src.experiments.run_downstream  (loads the same config)
-# See: customer_segmentation/src/experiments/run_rajc.py
+#   python -m customer_segmentation.src.experiments.run_downstream
+#
+# The upgraded implementation supports three model types:
+# - model_type: constant_prob    (legacy RAJC-CP++ baseline)
+# - model_type: logreg          (mixture of logistic experts)
+# - model_type: ramoe           (Response-Aware Mixture-of-Experts, default)
+#
+# IMPORTANT
+# ---------
+# All scripts follow a *leakage-free* protocol:
+# - split raw rows into train/val/test
+# - fit preprocessing transformer on train only
+# - reuse the transformer on val/test
+#
+# For RAMoE:
+# - gating / segmentation uses behaviour features X_beh only
+# - experts / response prediction use full features X_full
 
 rajc:
-  # Cluster count (K)
+  # -------------------- Core segmentation settings --------------------
   n_clusters: 4
 
-  # Response-awareness strength.
-  # Larger -> more strongly encourages clusters to have consistent response behavior.
-  # NOTE: If you later add PCA / reduce feature scale, you can re-tune this.
-  lambda: 3.0
+  # Response-awareness strength (legacy key "lambda" will be mapped to RAJCConfig.lambda_)
+  lambda: 1.0
 
-  # Polarization regularization: encourages p_k away from 0.5 (more "high/low response" segments).
-  gamma: 0.1
+  # Choose the upgraded method by default
+  model_type: ramoe
 
-  # Laplace smoothing alpha used in p_k estimation.
-  smoothing: 1.0
+  # -------------------- Gating / clustering distribution --------------------
+  # "gmm" is usually more stable than hard k-means for mixture gating.
+  gating_type: gmm
+  covariance_type: diag
+  covariance_reg: 1.0e-6
+  min_component_weight: 1.0e-6
 
-  # Alternating optimization iterations / stopping rule
+  # Temperatures
+  # - temperature: softness of the E-step posterior q(z|x,y)
+  # - gating_temperature: softness used at inference time (predict_response)
+  temperature: 0.8
+  gating_temperature: 1.0
+
+  # -------------------- Experts (response models) --------------------
+  # Recommended default: shallow tree ensemble expert for nonlinearity
+  expert_type: hgbdt
+  expert_class_weight: balanced
+
+  # Histogram Gradient Boosting (sklearn)
+  hgbdt_max_depth: 3
+  hgbdt_learning_rate: 0.05
+  hgbdt_max_iter: 250
+  hgbdt_min_samples_leaf: 20
+  hgbdt_l2_regularization: 0.0
+  hgbdt_early_stopping: true
+  hgbdt_validation_fraction: 0.1
+  hgbdt_n_iter_no_change: 20
+
+  # Logistic regression expert (only used if expert_type=logreg or model_type=logreg)
+  logreg_C: 1.0
+  logreg_max_iter: 800
+  logreg_solver: lbfgs
+  logreg_class_weight: null
+
+  # -------------------- Hybrid global expert (HyRAMoE) --------------------
+  # Adds a global expert and blends it with the mixture prediction:
+  #   p_hat = (1-hybrid_alpha) * p_moe + hybrid_alpha * p_global
+  use_global_expert: true
+  global_expert_type: hgbdt
+  hybrid_alpha: 0.2
+
+  # -------------------- Budget-aware training (optional) --------------------
+  # If budget_reweight_alpha > 0, the M-step upweights samples in the predicted top-q
+  # (helps lift@top-q / campaign targeting; can be tuned in ablation).
+  budget_top_frac: 0.2
+  budget_reweight_alpha: 0.0
+
+  # -------------------- Optimisation / reproducibility --------------------
   max_iter: 50
-  tol: 0.001
-
-  # Reproducibility + KMeans init stability
+  tol: 1.0e-3
   random_state: 42
   kmeans_n_init: 20
 
-  # Current code only supports "constant_prob"
-  model_type: "constant_prob"
-
-  # Reserved for future extension (kept for compatibility with loaders);
-  # current RAJC-CP++ implementation does not use it directly.
-  logistic_regression:
-    max_iter: 800
+  # -------------------- Legacy / compatibility knobs --------------------
+  # Used only when model_type=constant_prob
+  gamma: 0.0
+  smoothing: 1.0

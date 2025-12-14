@@ -1,16 +1,18 @@
-"""Visualization helpers for cluster evaluation, elbow plots, embeddings, and new-method curves.
+"""Visualization helpers for cluster evaluation, embeddings, and prediction curves.
 
-原模块主要支撑 RQ1 / Ablation：
-- Elbow 曲线看选 K；
-- Silhouette 分布看簇紧凑度/分离度；
-- PCA / t-SNE 可视化高维特征空间中的簇结构；
-- 簇中心折线图看不同特征上的“形状差异”。
+This module supports:
+- *Clustering* plots: elbow curve, silhouette distribution, PCA/t-SNE scatter,
+  and cluster-center line plots.
+- *Prediction* evaluation curves: ROC, Precision-Recall, calibration, lift and
+  threshold sweep (used by the leak-free evaluation protocol).
+- *RAMoE / HyRAMoE* diagnostics: distributions of soft-assignment entropy and
+  maximum assignment probability.
 
-Upgrades for the new methodology:
-- Remove seaborn dependency (matplotlib only).
-- Add prediction-evaluation curves needed by the new protocol:
-  ROC / PR / Calibration / Lift / Threshold sweep.
-- Add stronger guards: silhouette requires n_clusters>=2 and n_samples>n_clusters.
+Notes
+-----
+- Uses matplotlib only (no seaborn hard dependency).
+- Robust to sklearn ``predict_proba`` outputs of shape (n, 2).
+- Drops NaNs/Infs for plotting stability.
 """
 
 from __future__ import annotations
@@ -35,6 +37,20 @@ from sklearn.metrics import (
 )
 from sklearn.calibration import calibration_curve
 
+try:
+    # Optional: used for consistent lift computation if available
+    from customer_segmentation.src.utils.metrics_utils import compute_lift
+
+    _HAS_PROJECT_METRICS = True
+except Exception:  # pragma: no cover
+    compute_lift = None  # type: ignore
+    _HAS_PROJECT_METRICS = False
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
 
 def _maybe_save(fig: plt.Figure, save_path: str | Path | None) -> None:
     if save_path is None:
@@ -44,28 +60,114 @@ def _maybe_save(fig: plt.Figure, save_path: str | Path | None) -> None:
     fig.savefig(path, bbox_inches="tight", dpi=200)
 
 
-def _to_1d_numpy(x: Any) -> np.ndarray:
-    if isinstance(x, pd.Series):
+def _to_1d_labels(x: Any) -> np.ndarray:
+    """Convert labels to a 1D NumPy array."""
+    if isinstance(x, (pd.Series, pd.Index)):
         arr = x.to_numpy()
     elif isinstance(x, pd.DataFrame):
-        arr = x.to_numpy().reshape(-1)
+        if x.shape[1] != 1:
+            # If user passed a 2-column proba DataFrame by mistake, do not guess.
+            raise ValueError(f"Expected a single-column DataFrame for labels, got shape={x.shape}.")
+        arr = x.iloc[:, 0].to_numpy()
     else:
-        arr = np.asarray(x).reshape(-1)
-    return arr
+        arr = np.asarray(x)
+    return np.asarray(arr).reshape(-1)
+
+
+def _to_1d_scores(x: Any) -> np.ndarray:
+    """Convert scores/probabilities to a 1D array.
+
+    Accepts:
+    - 1D list/ndarray/Series
+    - 2D ndarray of shape (n,2) from sklearn.predict_proba -> take column 1
+    - DataFrame with 1 column -> that column
+    - DataFrame with 2 columns -> take the second column
+    """
+    if isinstance(x, pd.Series):
+        arr = x.to_numpy(dtype=float)
+    elif isinstance(x, pd.DataFrame):
+        if x.shape[1] == 1:
+            arr = x.iloc[:, 0].to_numpy(dtype=float)
+        elif x.shape[1] == 2:
+            arr = x.iloc[:, 1].to_numpy(dtype=float)
+        else:
+            raise ValueError(f"Expected 1 or 2 columns for scores/proba, got shape={x.shape}.")
+    else:
+        arr = np.asarray(x, dtype=float)
+        if arr.ndim == 2:
+            if arr.shape[1] == 2:
+                arr = arr[:, 1]
+            elif arr.shape[1] == 1:
+                arr = arr[:, 0]
+            else:
+                raise ValueError(
+                    f"Ambiguous score array shape={arr.shape}. Pass a 1D array or an (n,2) predict_proba output."
+                )
+    return np.asarray(arr, dtype=float).reshape(-1)
 
 
 def _drop_nan_pairs(y: Any, s: Any) -> Tuple[np.ndarray, np.ndarray]:
-    yy = _to_1d_numpy(y).astype(float)
-    ss = _to_1d_numpy(s).astype(float)
+    yy = _to_1d_labels(y).astype(float)
+    ss = _to_1d_scores(s).astype(float)
     if yy.shape[0] != ss.shape[0]:
         raise ValueError(f"y and score/prob length mismatch: {yy.shape[0]} vs {ss.shape[0]}")
     mask = np.isfinite(yy) & np.isfinite(ss)
     return yy[mask], ss[mask]
 
 
-# -----------------------------
+def _ece(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    *,
+    n_bins: int = 10,
+    strategy: str = "uniform",
+) -> float:
+    """Simple Expected Calibration Error (ECE).
+
+    The implementation is intentionally lightweight and self-contained.
+    """
+    y_true = (y_true > 0).astype(int)
+    y_prob = np.clip(y_prob.astype(float), 1e-12, 1.0 - 1e-12)
+
+    n_bins = int(max(2, n_bins))
+
+    if strategy == "uniform":
+        edges = np.linspace(0.0, 1.0, n_bins + 1)
+    elif strategy == "quantile":
+        qs = np.linspace(0.0, 1.0, n_bins + 1)
+        edges = np.quantile(y_prob, qs)
+        edges[0] = 0.0
+        edges[-1] = 1.0
+        # handle duplicate edges due to ties
+        if np.unique(edges).size < edges.size:
+            edges = np.linspace(0.0, 1.0, n_bins + 1)
+    else:
+        raise ValueError(f"Unsupported ECE binning strategy: {strategy}")
+
+    # bin index in [0, n_bins-1]
+    bin_ids = np.digitize(y_prob, edges[1:-1], right=False)
+
+    ece = 0.0
+    n = float(len(y_true))
+    if n == 0:
+        return float("nan")
+
+    for b in range(n_bins):
+        mask = bin_ids == b
+        if not np.any(mask):
+            continue
+        w = float(np.sum(mask)) / n
+        acc = float(np.mean(y_true[mask]))
+        conf = float(np.mean(y_prob[mask]))
+        ece += w * abs(acc - conf)
+
+    return float(ece)
+
+
+# ---------------------------------------------------------------------------
 # Clustering plots
-# -----------------------------
+# ---------------------------------------------------------------------------
+
 
 def plot_elbow_curve(
     ks: Iterable[int],
@@ -74,7 +176,7 @@ def plot_elbow_curve(
     *,
     save_path: str | Path | None = None,
 ) -> plt.Figure:
-    """Plot inertia vs. cluster number for elbow selection."""
+    """Plot inertia vs. number of clusters for elbow selection."""
     ks = list(ks)
     inertias = list(inertias)
 
@@ -85,7 +187,11 @@ def plot_elbow_curve(
     ax.set_title(title)
 
     for k, inertia in zip(ks, inertias):
-        ax.text(k, inertia, f"{inertia:.1f}", fontsize=8, ha="center", va="bottom")
+        try:
+            ax.text(k, float(inertia), f"{float(inertia):.1f}", fontsize=8, ha="center", va="bottom")
+        except Exception:
+            # If inertia is not numeric, skip annotation
+            pass
 
     fig.tight_layout()
     _maybe_save(fig, save_path)
@@ -102,36 +208,41 @@ def plot_silhouette_distribution(
     show_mean: bool = True,
     save_path: str | Path | None = None,
 ) -> plt.Figure:
-    """Draw per-sample silhouette scores grouped by cluster (box + jitter scatter).
+    """Plot per-sample silhouette scores grouped by cluster.
 
-    Raises
-    ------
-    ValueError
-        If fewer than two clusters are present, or n_samples <= n_clusters.
+    Notes
+    -----
+    Silhouette is undefined when:
+    - fewer than 2 clusters exist, or
+    - n_samples <= n_clusters.
     """
-    X = features.to_numpy() if isinstance(features, pd.DataFrame) else np.asarray(features)
-    y = labels.to_numpy() if isinstance(labels, pd.Series) else np.asarray(labels)
-    y = y.reshape(-1)
+    X = features.to_numpy(dtype=float) if isinstance(features, pd.DataFrame) else np.asarray(features, dtype=float)
+    y = _to_1d_labels(labels)
 
     if X.shape[0] != y.shape[0]:
         raise ValueError(f"features and labels length mismatch: {X.shape[0]} vs {y.shape[0]}")
 
+    # Drop rows with non-finite feature values or missing labels
+    mask = np.all(np.isfinite(X), axis=1) & pd.Series(y).notna().to_numpy()
+    X = X[mask]
+    y = y[mask]
+
     # Optional subsampling for speed
-    if sample_size is not None and sample_size < X.shape[0]:
+    if sample_size is not None and 0 < int(sample_size) < X.shape[0]:
         rng = np.random.default_rng(int(random_state))
         idx = rng.choice(X.shape[0], size=int(sample_size), replace=False)
         X = X[idx]
         y = y[idx]
 
-    n_clusters = len(np.unique(y))
+    clusters = sorted(pd.unique(pd.Series(y)))
+    n_clusters = len(clusters)
+
     if n_clusters < 2:
         raise ValueError("Silhouette distribution requires at least two clusters.")
     if X.shape[0] <= n_clusters:
         raise ValueError("Silhouette is undefined when n_samples <= n_clusters.")
 
     scores = silhouette_samples(X, y)
-
-    clusters = sorted(np.unique(y))
     data = [scores[y == c] for c in clusters]
 
     fig, ax = plt.subplots(figsize=(7, 4))
@@ -147,7 +258,7 @@ def plot_silhouette_distribution(
         ax.scatter(np.full(s.size, i) + jitter, s, s=8, alpha=0.35)
 
     if show_mean:
-        ax.axhline(float(scores.mean()), linestyle="--", linewidth=1, label="Mean")
+        ax.axhline(float(np.mean(scores)), linestyle="--", linewidth=1, label="Mean")
         ax.legend()
 
     ax.set_title(title)
@@ -167,28 +278,28 @@ def plot_pca_scatter(
     random_state: int = 42,
     save_path: str | Path | None = None,
 ) -> plt.Figure:
-    """Scatter plot of PCA-reduced features colored by cluster labels.
-
-    Axis labels include explained variance ratio.
-    """
-    X = features.to_numpy() if isinstance(features, pd.DataFrame) else np.asarray(features)
-    y = labels.to_numpy() if isinstance(labels, pd.Series) else np.asarray(labels)
-    y = y.reshape(-1)
+    """Scatter plot of PCA-reduced features coloured by cluster labels."""
+    X = features.to_numpy(dtype=float) if isinstance(features, pd.DataFrame) else np.asarray(features, dtype=float)
+    y = _to_1d_labels(labels)
 
     if X.ndim != 2 or X.shape[1] < 2:
         raise ValueError("PCA scatter requires at least 2 feature dimensions.")
+
+    # Drop non-finite rows
+    mask = np.all(np.isfinite(X), axis=1) & pd.Series(y).notna().to_numpy()
+    X = X[mask]
+    y = y[mask]
 
     pca = PCA(n_components=2, random_state=int(random_state))
     reduced = pca.fit_transform(X)
     var_ratio = pca.explained_variance_ratio_
 
-    clusters = sorted(np.unique(y))
+    clusters = sorted(pd.unique(pd.Series(y)))
     fig, ax = plt.subplots(figsize=(6, 4))
 
-    # Plot per cluster for a clean legend
     for cid in clusters:
-        mask = y == cid
-        ax.scatter(reduced[mask, 0], reduced[mask, 1], s=20, alpha=0.8, label=str(cid))
+        mask_c = y == cid
+        ax.scatter(reduced[mask_c, 0], reduced[mask_c, 1], s=20, alpha=0.8, label=str(cid))
 
     ax.set_title(title)
     ax.set_xlabel(f"PC1 ({var_ratio[0]*100:.1f}% var)")
@@ -210,24 +321,29 @@ def plot_tsne_scatter(
     sample_size: Optional[int] = None,
     save_path: str | Path | None = None,
 ) -> plt.Figure:
-    """t-SNE embedding colored by cluster labels (useful for nonlinear structure)."""
-    X = features.to_numpy() if isinstance(features, pd.DataFrame) else np.asarray(features)
-    y = labels.to_numpy() if isinstance(labels, pd.Series) else np.asarray(labels)
-    y = y.reshape(-1)
+    """t-SNE embedding coloured by cluster labels."""
+    X = features.to_numpy(dtype=float) if isinstance(features, pd.DataFrame) else np.asarray(features, dtype=float)
+    y = _to_1d_labels(labels)
 
     if X.shape[0] != y.shape[0]:
         raise ValueError(f"features and labels length mismatch: {X.shape[0]} vs {y.shape[0]}")
 
-    if sample_size is not None and sample_size < X.shape[0]:
+    # Drop non-finite rows
+    mask = np.all(np.isfinite(X), axis=1) & pd.Series(y).notna().to_numpy()
+    X = X[mask]
+    y = y[mask]
+
+    if sample_size is not None and 0 < int(sample_size) < X.shape[0]:
         rng = np.random.default_rng(42 if random_state is None else int(random_state))
         idx = rng.choice(X.shape[0], size=int(sample_size), replace=False)
         X = X[idx]
         y = y[idx]
 
-    # t-SNE requires perplexity < n_samples
     if X.shape[0] <= 3:
         raise ValueError("t-SNE requires at least 4 samples.")
-    if perplexity >= X.shape[0]:
+
+    # t-SNE requires perplexity < n_samples
+    if float(perplexity) >= X.shape[0]:
         perplexity = max(5.0, float(X.shape[0] - 1))
 
     tsne = TSNE(
@@ -239,11 +355,11 @@ def plot_tsne_scatter(
     )
     reduced = tsne.fit_transform(X)
 
-    clusters = sorted(np.unique(y))
+    clusters = sorted(pd.unique(pd.Series(y)))
     fig, ax = plt.subplots(figsize=(6, 4))
     for cid in clusters:
-        mask = y == cid
-        ax.scatter(reduced[mask, 0], reduced[mask, 1], s=20, alpha=0.8, label=str(cid))
+        mask_c = y == cid
+        ax.scatter(reduced[mask_c, 0], reduced[mask_c, 1], s=20, alpha=0.8, label=str(cid))
 
     ax.set_title(title)
     ax.set_xlabel("t-SNE 1")
@@ -262,15 +378,14 @@ def plot_cluster_centers(
     *,
     save_path: str | Path | None = None,
 ) -> plt.Figure:
-    """Line plot of cluster centers across dimensions to compare shape differences."""
+    """Line plot of cluster centers across feature dimensions."""
     if feature_names is None:
         feature_names = list(centers.columns)
     else:
         feature_names = list(feature_names)
 
     fig, ax = plt.subplots(figsize=(10, 5))
-    for row_idx, (cluster_id, row) in enumerate(centers.iterrows()):
-        # Use the DataFrame index as the cluster id for correctness.
+    for cluster_id, row in centers.iterrows():
         ax.plot(feature_names, row.values, marker="o", label=f"Cluster {cluster_id}")
 
     ax.set_xlabel("Features")
@@ -284,9 +399,10 @@ def plot_cluster_centers(
     return fig
 
 
-# -----------------------------
-# New-method evaluation curves
-# -----------------------------
+# ---------------------------------------------------------------------------
+# Prediction evaluation curves
+# ---------------------------------------------------------------------------
+
 
 def plot_roc_curve(
     y_true: Union[pd.Series, np.ndarray],
@@ -295,15 +411,12 @@ def plot_roc_curve(
     *,
     save_path: str | Path | None = None,
 ) -> plt.Figure:
-    """ROC curve + AUC (needed by the new evaluation protocol)."""
+    """ROC curve with AUC."""
     y, p = _drop_nan_pairs(y_true, y_prob)
-    y = y.astype(int)
+    y = (y > 0).astype(int)
 
-    # Numerical stability
-    eps = 1e-15
-    p = np.clip(p, eps, 1.0 - eps)
+    p = np.clip(p, 1e-15, 1.0 - 1e-15)
 
-    # AUC can fail if only one class exists
     try:
         auc = float(roc_auc_score(y, p))
     except ValueError:
@@ -331,12 +444,11 @@ def plot_pr_curve(
     *,
     save_path: str | Path | None = None,
 ) -> plt.Figure:
-    """Precision-Recall curve + AP (PR-AUC)."""
+    """Precision-Recall curve with Average Precision (AP)."""
     y, p = _drop_nan_pairs(y_true, y_prob)
-    y = y.astype(int)
+    y = (y > 0).astype(int)
 
-    eps = 1e-15
-    p = np.clip(p, eps, 1.0 - eps)
+    p = np.clip(p, 1e-15, 1.0 - 1e-15)
 
     try:
         ap = float(average_precision_score(y, p))
@@ -364,20 +476,26 @@ def plot_calibration_curve(
     *,
     n_bins: int = 10,
     strategy: str = "uniform",
+    show_ece: bool = True,
     save_path: str | Path | None = None,
 ) -> plt.Figure:
-    """Calibration curve (reliability diagram)."""
+    """Reliability diagram (calibration curve), optionally annotated with ECE."""
     y, p = _drop_nan_pairs(y_true, y_prob)
-    y = y.astype(int)
+    y = (y > 0).astype(int)
 
-    eps = 1e-15
-    p = np.clip(p, eps, 1.0 - eps)
+    p = np.clip(p, 1e-15, 1.0 - 1e-15)
 
     frac_pos, mean_pred = calibration_curve(y, p, n_bins=int(n_bins), strategy=str(strategy))
 
+    ece = _ece(y, p, n_bins=int(n_bins), strategy=str(strategy)) if show_ece else None
+
     fig, ax = plt.subplots(figsize=(5.5, 4))
-    ax.plot(mean_pred, frac_pos, marker="o", label="Model")
-    ax.plot([0, 1], [0, 1], linestyle="--", linewidth=1, label="Perfectly calibrated")
+    label = "Model"
+    if show_ece and ece is not None and np.isfinite(ece):
+        label = f"Model (ECE={ece:.3f})"
+
+    ax.plot(mean_pred, frac_pos, marker="o", label=label)
+    ax.plot([0, 1], [0, 1], linestyle="--", linewidth=1, label="Perfect")
     ax.set_xlabel("Mean predicted probability")
     ax.set_ylabel("Fraction of positives")
     ax.set_title(title)
@@ -396,9 +514,12 @@ def plot_lift_curve(
     fractions: Sequence[float] = (0.05, 0.1, 0.2, 0.3, 0.5),
     save_path: str | Path | None = None,
 ) -> plt.Figure:
-    """Lift@budget curve for business-facing evaluation.
+    """Lift@budget curve.
 
     Lift(f) = precision@top-f / base_rate.
+
+    If project metric utilities are available, uses ``compute_lift`` to match
+    the exact definition used in tables.
     """
     y, s = _drop_nan_pairs(y_true, scores)
     y = (y > 0).astype(int)
@@ -406,31 +527,29 @@ def plot_lift_curve(
     if y.size == 0:
         raise ValueError("Empty inputs after dropping NaNs.")
 
-    base_rate = float(y.mean())
-    if base_rate <= 0:
-        base_rate = float("nan")
+    base_rate = float(np.mean(y))
 
-    # Sort by score descending
-    order = np.argsort(-s)
-    y_sorted = y[order]
-
-    lifts = []
-    fracs = []
-    n = y_sorted.size
+    lifts: list[float] = []
+    fracs: list[float] = []
 
     for f in fractions:
         f = float(f)
         if not (0.0 < f <= 1.0):
             continue
-        k = int(np.ceil(n * f))
-        k = max(1, min(k, n))
-        prec = float(y_sorted[:k].mean())
-        lift = float("nan") if not np.isfinite(base_rate) or base_rate == 0 else float(prec / base_rate)
         fracs.append(f)
-        lifts.append(lift)
+        if _HAS_PROJECT_METRICS and compute_lift is not None:
+            lifts.append(float(compute_lift(y, s, top_frac=f)))
+        else:
+            # Local fallback
+            order = np.argsort(-s)
+            y_sorted = y[order]
+            k = int(np.ceil(len(y_sorted) * f))
+            k = max(1, min(k, len(y_sorted)))
+            prec = float(np.mean(y_sorted[:k]))
+            lifts.append(float("nan") if base_rate <= 0 else float(prec / base_rate))
 
     fig, ax = plt.subplots(figsize=(5.5, 4))
-    ax.plot(fracs, lifts, marker="o", label="Model lift")
+    ax.plot(fracs, lifts, marker="o", label="Model")
     ax.axhline(1.0, linestyle="--", linewidth=1, label="Random (lift=1)")
     ax.set_xlabel("Budget fraction (top-q)")
     ax.set_ylabel("Lift")
@@ -450,16 +569,16 @@ def plot_threshold_sweep(
     thresholds: Optional[Sequence[float]] = None,
     save_path: str | Path | None = None,
 ) -> plt.Figure:
-    """Plot F1 and Balanced Accuracy over thresholds (for validation threshold selection).
+    """Plot F1 and Balanced Accuracy over thresholds.
 
-    This supports the new protocol: choose threshold on validation set, then
-    report final metrics on the held-out test set.
+    This supports the recommended protocol:
+    - choose threshold on validation
+    - report metrics on test
     """
     y, p = _drop_nan_pairs(y_true, y_prob)
-    y = y.astype(int)
+    y = (y > 0).astype(int)
 
-    eps = 1e-15
-    p = np.clip(p, eps, 1.0 - eps)
+    p = np.clip(p, 1e-15, 1.0 - 1e-15)
 
     if thresholds is None:
         thresholds = np.linspace(0.0, 1.0, 101)
@@ -469,12 +588,12 @@ def plot_threshold_sweep(
     bas = np.zeros_like(ths)
 
     for i, t in enumerate(ths):
-        pred = (p >= t).astype(int)
+        pred = (p >= float(t)).astype(int)
         f1s[i] = f1_score(y, pred, zero_division=0)
         bas[i] = balanced_accuracy_score(y, pred)
 
-    best_f1_t = float(ths[np.argmax(f1s)])
-    best_ba_t = float(ths[np.argmax(bas)])
+    best_f1_t = float(ths[int(np.argmax(f1s))])
+    best_ba_t = float(ths[int(np.argmax(bas))])
 
     fig, ax = plt.subplots(figsize=(6.5, 4))
     ax.plot(ths, f1s, label=f"F1 (best@{best_f1_t:.2f})")
@@ -487,3 +606,112 @@ def plot_threshold_sweep(
 
     _maybe_save(fig, save_path)
     return fig
+
+
+# ---------------------------------------------------------------------------
+# RAMoE / HyRAMoE diagnostics (soft assignments)
+# ---------------------------------------------------------------------------
+
+
+def _to_2d_array(q: Any) -> np.ndarray:
+    """Convert responsibilities / assignment probabilities to a 2D float array."""
+    if isinstance(q, pd.DataFrame):
+        arr = q.to_numpy(dtype=float)
+    else:
+        arr = np.asarray(q, dtype=float)
+
+    if arr.ndim != 2:
+        raise ValueError(f"Expected a 2D array of responsibilities (n,K); got shape={arr.shape}.")
+    return arr
+
+
+def plot_assignment_entropy(
+    responsibilities: Any,
+    title: str = "Soft assignment entropy",
+    *,
+    bins: int = 30,
+    save_path: str | Path | None = None,
+) -> plt.Figure:
+    """Histogram of per-sample assignment entropy.
+
+    Entropy is computed as:
+        H(q_i) = -\sum_k q_{ik} log q_{ik}
+
+    Lower entropy => crisper segmentation (more interpretable).
+    """
+    q = _to_2d_array(responsibilities)
+
+    # Clip and normalise row-wise in case inputs are imperfect.
+    q = np.clip(q, 1e-12, 1.0)
+    q = q / np.clip(np.sum(q, axis=1, keepdims=True), 1e-12, None)
+
+    ent = -np.sum(q * np.log(q), axis=1)
+    ent = ent[np.isfinite(ent)]
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.hist(ent, bins=int(bins))
+    ax.set_xlabel("Entropy")
+    ax.set_ylabel("Count")
+    ax.set_title(title)
+
+    # Annotate mean
+    if ent.size > 0:
+        ax.axvline(float(np.mean(ent)), linestyle="--", linewidth=1, label=f"mean={float(np.mean(ent)):.3f}")
+        ax.legend()
+
+    fig.tight_layout()
+    _maybe_save(fig, save_path)
+    return fig
+
+
+def plot_assignment_maxprob(
+    responsibilities: Any,
+    title: str = "Max assignment probability",
+    *,
+    bins: int = 30,
+    save_path: str | Path | None = None,
+) -> plt.Figure:
+    """Histogram of the maximum assignment probability per sample.
+
+    Higher max-prob => crisper segmentation.
+    """
+    q = _to_2d_array(responsibilities)
+
+    q = np.clip(q, 1e-12, 1.0)
+    q = q / np.clip(np.sum(q, axis=1, keepdims=True), 1e-12, None)
+
+    m = np.max(q, axis=1)
+    m = m[np.isfinite(m)]
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.hist(m, bins=int(bins), range=(0.0, 1.0))
+    ax.set_xlabel("max_k q_{ik}")
+    ax.set_ylabel("Count")
+    ax.set_title(title)
+
+    if m.size > 0:
+        ax.axvline(float(np.mean(m)), linestyle="--", linewidth=1, label=f"mean={float(np.mean(m)):.3f}")
+        ax.legend()
+
+    fig.tight_layout()
+    _maybe_save(fig, save_path)
+    return fig
+
+
+__all__ = [
+    # clustering plots
+    "plot_elbow_curve",
+    "plot_silhouette_distribution",
+    "plot_pca_scatter",
+    "plot_tsne_scatter",
+    "plot_cluster_centers",
+    # prediction curves
+    "plot_roc_curve",
+    "plot_pr_curve",
+    "plot_calibration_curve",
+    "plot_lift_curve",
+    "plot_threshold_sweep",
+    # RAMoE diagnostics
+    "plot_assignment_entropy",
+    "plot_assignment_maxprob",
+]

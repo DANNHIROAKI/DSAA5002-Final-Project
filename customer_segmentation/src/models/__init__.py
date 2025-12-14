@@ -1,33 +1,37 @@
-"""Model implementations for clustering and response modeling.
+"""customer_segmentation.src.models
 
-This package centralizes the main models used in the project:
+This package contains all model implementations used in the project:
 
-* KMeansBaseline / GMMBaseline for unsupervised clustering.
-* ClusterThenPredict baseline for two-stage cluster-then-predict.
-* RAJCModel for response-aware joint clustering.
+- **Unsupervised segmentation baselines**:
+    - :class:`~customer_segmentation.src.models.kmeans_baseline.KMeansBaseline`
+    - :class:`~customer_segmentation.src.models.gmm_baseline.GMMBaseline`
 
-Upgraded method (main model)
----------------------------
-We upgrade the original RAJC family to support a stronger, ranking-oriented
-joint model: **RAMoE (Response-Aware Mixture-of-Experts)**.
+- **Two-stage baseline**:
+    - Cluster-then-predict (K-Means on behavior features, then a classifier per cluster).
 
-The model mode is controlled by ``RAJCConfig.model_type``:
+- **Main proposed model**:
+    - :class:`~customer_segmentation.src.models.rajc.RAJCModel` with
+      ``RAJCConfig.model_type=\"ramoe\"``.
 
-- ``"ramoe"`` (default, recommended):
-    Soft, behavior-based gating + per-segment logistic experts trained with
-    an EM-like algorithm. Designed to improve hold-out AUC and lift metrics.
-- ``"constant_prob"``:
-    RAJC-CP++ with cluster-wise constant response probability ``p_k``.
-    Useful for ablation and interpretability.
-- ``"logreg"``:
-    Hard-assignment joint optimization with per-cluster logistic experts.
+Upgraded joint model (new method)
+--------------------------------
+The project upgrades the original RAJC family into a stronger joint framework:
 
-Unified API
------------
-All joint models expose:
+**HyRAMoE / RAMoE (Response-Aware Mixture-of-Experts)**
+
+Key ideas:
+- **Gating/segmentation** depends only on *behavior* features ``X_beh`` (leakage-safe).
+- **Experts** predict campaign response using *full* features ``X_full``.
+- Training uses an EM-style loop with soft responsibilities.
+- The default gating is a lightweight **diagonal-covariance GMM** (more flexible than
+  soft K-Means), and the default experts can be **tree-based** (HistGradientBoosting)
+  for stronger nonlinear decision boundaries.
+
+All joint models share the same API:
     - ``fit(X_beh, y, full_features=X_full)``
     - ``predict_clusters(X_beh)``
     - ``predict_response(X_beh, full_features=X_full)``
+
 """
 
 from __future__ import annotations

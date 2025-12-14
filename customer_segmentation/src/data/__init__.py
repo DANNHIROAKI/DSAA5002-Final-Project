@@ -1,43 +1,32 @@
-"""Data loading, cleaning, and feature engineering utilities.
+"""Data loading, deterministic cleaning, and leakage-free feature building.
 
-This package provides a small, cohesive API for working with the Kaggle
-*Customer Personality Analysis* ("marketing_campaign.csv") dataset used in
-the DSAA 5002 final project.
+This package implements a **two-stage** data workflow:
 
-Key design choices (for the upgraded method)
---------------------------------------------
-- Default target label is the most recent campaign response, i.e. raw column
-  ``Response`` (see ``add_response_label(..., mode="recent")``).
-- Historical campaign acceptances (``AcceptedCmp1``-``AcceptedCmp5``) are
-  transformed into features (``PastAcceptCnt`` / ``EverAccepted``) and are NOT
-  merged into the label by default.
-- Feature transformation (scaling / one-hot encoding) supports a leakage-free
-  protocol: fit on train only, then transform on validation/test via
-  ``assemble_feature_table(..., fit=False, transformer=preprocessor)``.
+1) **Deterministic row cleaning** (:func:`clean_data`)
+   - safe to call *before* train/val/test splitting
+   - derives only stable columns (Age, customer_tenure_days)
+   - does **not** impute or winsorize
 
-Typical usage
--------------
->>> from customer_segmentation.src.data import (
-...     load_raw_data, clean_data,
-...     build_rfm_features, add_structural_features,
-...     add_response_history_features, add_response_label,
-...     train_val_test_split, assemble_feature_table,
-... )
->>> df_raw = load_raw_data()
->>> df = clean_data(df_raw)
->>> df = build_rfm_features(df)
->>> df = add_structural_features(df)
->>> df = add_response_history_features(df)
->>> df = add_response_label(df, mode="recent")  # y = Response
->>> train_df, val_df, test_df = train_val_test_split(df, stratify_col="campaign_response")
->>> X_train, y_train, pre = assemble_feature_table(train_df, fit=True)
->>> X_val, y_val, _ = assemble_feature_table(val_df, transformer=pre, fit=False)
+2) **Train-fitted preprocessing + feature table** (:func:`assemble_feature_table`)
+   - imputation, quantile clipping (winsorization), scaling, one-hot encoding
+   - **fit on train only**, then reused for val/test
+
+The design is tailored for the course default customer segmentation setting
+and the upgraded response-aware methods.
 """
 
 from __future__ import annotations
 
 from .load import load_raw_data
-from .preprocess import clean_data, train_val_split, train_val_test_split
+from .preprocess import (
+    AGE_BOUNDS,
+    DEFAULT_DATE_FORMAT,
+    DEFAULT_REFERENCE_DATE,
+    DEFAULT_REFERENCE_YEAR,
+    clean_data,
+    train_val_split,
+    train_val_test_split,
+)
 from .features import (
     FeatureConfig,
     DEFAULT_LABEL_COL,
@@ -53,18 +42,28 @@ from .features import (
 )
 
 __all__ = [
+    # loading
     "load_raw_data",
+    # deterministic cleaning
     "clean_data",
+    "DEFAULT_DATE_FORMAT",
+    "DEFAULT_REFERENCE_DATE",
+    "DEFAULT_REFERENCE_YEAR",
+    "AGE_BOUNDS",
+    # splitting
     "train_val_split",
     "train_val_test_split",
+    # labels & feature engineering
     "FeatureConfig",
     "DEFAULT_LABEL_COL",
     "add_response_history_features",
     "add_response_label",
-    "assemble_feature_table",
     "build_rfm_features",
     "add_structural_features",
+    # leakage-free feature tables
+    "assemble_feature_table",
     "split_behavior_and_response_features",
+    # feature lists
     "BEHAVIOR_NUMERIC_FEATURES",
     "RESPONSE_NUMERIC_FEATURES",
     "CATEGORICAL_FEATURES",

@@ -1,29 +1,38 @@
-"""Downstream response prediction with cluster IDs as features (leakage-free).
+"""Downstream response prediction with cluster IDs as additional features (leakage-free).
 
-We compare four feature configurations:
-1) Base features only.
-2) Base + KMeans cluster IDs (clusters learned on behavior features).
-3) Base + GMM cluster IDs (clusters learned on behavior features).
-4) Base + RAJC/RAMoE cluster IDs (clusters learned on behavior features with labels).
+We compare several feature configurations for a supervised response model:
 
-Upgrades vs previous version:
-- Uses y = Response (label_mode="recent").
-- Splits BEFORE preprocessing; fits transformer on train only.
-- Adds lift@20% to the result table for a marketing-budget view.
+1) Base features only (X_full).
+2) Base + KMeans cluster IDs (clusters learned on X_beh).
+3) Base + GMM cluster IDs (clusters learned on X_beh).
+4) Base + RAJC/RAMoE cluster IDs (clusters learned on X_beh with labels via the proposed method).
+
+Optionally, we also report the *direct* RAJC/RAMoE probability predictions as a stand-alone predictor (no extra classifier).
+
+Leakage-free protocol
+---------------------
+- Split raw rows into train/val/test.
+- Fit preprocessing transformer on train only.
+- Derive clusters on train; apply to val/test using behaviour features only.
+- For models that output probabilities, select a decision threshold on val (max F1), then report test metrics.
+
+Outputs
+-------
+Writes ``customer_segmentation/outputs/tables/downstream_metrics.csv``.
 """
 
 from __future__ import annotations
 
 import argparse
+from dataclasses import fields
 from pathlib import Path
 import sys
-from typing import Dict, Tuple, Sequence, Optional
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 import yaml
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import train_test_split
 
 from customer_segmentation.src.data.features import (
     add_response_label,
@@ -31,7 +40,7 @@ from customer_segmentation.src.data.features import (
     split_behavior_and_response_features,
 )
 from customer_segmentation.src.data.load import load_raw_data
-from customer_segmentation.src.data.preprocess import clean_data
+from customer_segmentation.src.data.preprocess import clean_data, train_val_test_split
 from customer_segmentation.src.evaluation import prediction as prediction_eval
 from customer_segmentation.src.models.gmm_baseline import GMMBaseline, GMMConfig
 from customer_segmentation.src.models.kmeans_baseline import KMeansBaseline, KMeansConfig
@@ -61,72 +70,93 @@ def _one_hot_clusters(
 
 def _add_cluster_features(
     train_x: pd.DataFrame,
+    val_x: pd.DataFrame,
     test_x: pd.DataFrame,
     train_labels: pd.Series | np.ndarray,
+    val_labels: pd.Series | np.ndarray,
     test_labels: pd.Series | np.ndarray,
     prefix: str,
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Append one-hot cluster indicators to train/test features with aligned columns."""
-    train_dummies = _one_hot_clusters(train_labels, index=train_x.index, prefix=prefix)
-    test_dummies = _one_hot_clusters(test_labels, index=test_x.index, prefix=prefix)
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Append one-hot cluster indicators with aligned columns."""
+    tr = _one_hot_clusters(train_labels, index=train_x.index, prefix=prefix)
+    va = _one_hot_clusters(val_labels, index=val_x.index, prefix=prefix)
+    te = _one_hot_clusters(test_labels, index=test_x.index, prefix=prefix)
 
-    test_dummies = test_dummies.reindex(columns=train_dummies.columns, fill_value=0)
+    # Align val/test columns to train dummies
+    va = va.reindex(columns=tr.columns, fill_value=0)
+    te = te.reindex(columns=tr.columns, fill_value=0)
 
-    train_aug = pd.concat([train_x, train_dummies], axis=1)
-    test_aug = pd.concat([test_x, test_dummies], axis=1)
-    return train_aug, test_aug
+    return (
+        pd.concat([train_x, tr], axis=1),
+        pd.concat([val_x, va], axis=1),
+        pd.concat([test_x, te], axis=1),
+    )
 
 
-def _train_classifier(train_x: pd.DataFrame, train_y: pd.Series) -> LogisticRegression:
-    clf = LogisticRegression(max_iter=500, class_weight="balanced")
+def _train_logreg(train_x: pd.DataFrame, train_y: pd.Series) -> LogisticRegression:
+    clf = LogisticRegression(max_iter=800, class_weight="balanced")
     clf.fit(train_x, train_y)
     return clf
 
 
-def _evaluate_model(
-    model: LogisticRegression, test_x: pd.DataFrame, test_y: pd.Series
-) -> Dict[str, float]:
-    probas = pd.Series(model.predict_proba(test_x)[:, 1], index=test_x.index)
-    preds = pd.Series(model.predict(test_x), index=test_x.index)
-    metrics = prediction_eval.compute_classification_metrics(test_y, preds, probas)
-    metrics["lift_top20"] = compute_lift(test_y, probas, top_frac=0.2)
+def _evaluate_probs(y_true: pd.Series, probas: pd.Series, threshold: float) -> Dict[str, float]:
+    preds = (probas >= float(threshold)).astype(int)
+    metrics: Dict[str, float] = {
+        **prediction_eval.compute_classification_metrics(y_true, preds, probas),
+        "lift_top20": compute_lift(y_true, probas, top_frac=0.2),
+        "threshold": float(threshold),
+    }
     return metrics
 
 
-def _load_rajc_config(logger) -> RAJCConfig:
-    """Load RAJCConfig from YAML with safe defaults."""
-    try:
-        cfg_dict = yaml.safe_load(DEFAULT_RAJC_CONFIG_PATH.read_text()) or {}
-        rajc_cfg = cfg_dict.get("rajc", {})
-    except FileNotFoundError:
+def _load_rajc_config(logger, *, override_model_type: str = "ramoe") -> RAJCConfig:
+    """Load RAJCConfig from YAML with safe defaults.
+
+    This is shared with `run_rajc`, but duplicated here to keep the script standalone.
+    """
+    if not DEFAULT_RAJC_CONFIG_PATH.is_file():
         logger.warning(
-            "RAJC config file not found at %s, using default RAJCConfig.",
+            "RAJC config file not found at %s, using default RAJCConfig().",
             DEFAULT_RAJC_CONFIG_PATH,
         )
-        rajc_cfg = {}
+        cfg = RAJCConfig()
+        cfg.model_type = override_model_type  # type: ignore[assignment]
+        return cfg
 
-    lr_cfg = rajc_cfg.get("logistic_regression", {}) or {}
+    try:
+        cfg_dict = yaml.safe_load(DEFAULT_RAJC_CONFIG_PATH.read_text()) or {}
+        rajc_cfg = cfg_dict.get("rajc", {}) or {}
+    except Exception as exc:  # pragma: no cover
+        logger.warning("Failed to parse RAJC YAML (%s). Using defaults.", exc)
+        cfg = RAJCConfig()
+        cfg.model_type = override_model_type  # type: ignore[assignment]
+        return cfg
 
-    return RAJCConfig(
-        n_clusters=rajc_cfg.get("n_clusters", 4),
-        lambda_=float(rajc_cfg.get("lambda", 1.0)),
-        gamma=float(rajc_cfg.get("gamma", 0.0)),
-        max_iter=int(rajc_cfg.get("max_iter", 30)),
-        tol=float(rajc_cfg.get("tol", 1e-3)),
-        random_state=rajc_cfg.get("random_state", 42),
-        smoothing=float(rajc_cfg.get("smoothing", 1.0)),
-        kmeans_n_init=int(rajc_cfg.get("kmeans_n_init", 10)),
-        model_type=rajc_cfg.get("model_type", "ramoe"),
-        temperature=float(rajc_cfg.get("temperature", 1.0)),
-        logreg_C=float(lr_cfg.get("C", 1.0)),
-        logreg_max_iter=int(lr_cfg.get("max_iter", 200)),
-        logreg_solver=str(lr_cfg.get("solver", "lbfgs")),
-    )
+    valid_fields = {f.name for f in fields(RAJCConfig)}
+    kwargs: Dict[str, Any] = {k: v for k, v in rajc_cfg.items() if k in valid_fields}
+
+    # Backward-compatible mapping
+    if "lambda" in rajc_cfg and "lambda_" not in kwargs:
+        kwargs["lambda_"] = float(rajc_cfg.get("lambda"))
+
+    # Always use new method for downstream cluster features unless user edits YAML
+    kwargs["model_type"] = str(rajc_cfg.get("model_type", override_model_type)).strip().lower()
+    if override_model_type is not None:
+        kwargs["model_type"] = override_model_type
+
+    kwargs = {k: v for k, v in kwargs.items() if k in valid_fields}
+
+    try:
+        return RAJCConfig(**kwargs)
+    except TypeError:
+        cfg = RAJCConfig()
+        cfg.model_type = override_model_type  # type: ignore[assignment]
+        return cfg
 
 
 def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Downstream response prediction using cluster IDs as features (leakage-free)."
+        description="Downstream response prediction using cluster IDs as features (leakage-free).",
     )
     parser.add_argument(
         "--test-size",
@@ -135,10 +165,16 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Fraction of data used as test set (default: 0.2).",
     )
     parser.add_argument(
+        "--val-size",
+        type=float,
+        default=0.1,
+        help="Fraction of data used as validation set (default: 0.1).",
+    )
+    parser.add_argument(
         "--random-state",
         type=int,
         default=42,
-        help="Random seed for train/test split (default: 42).",
+        help="Random seed for split (default: 42).",
     )
     parser.add_argument(
         "--skip-gmm",
@@ -149,6 +185,11 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--skip-rajc",
         action="store_true",
         help="Skip RAJC/RAMoE cluster features.",
+    )
+    parser.add_argument(
+        "--skip-direct-rajc",
+        action="store_true",
+        help="Skip direct RAJC/RAMoE probability predictions.",
     )
     return parser.parse_args(argv)
 
@@ -167,43 +208,49 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         logger.error("%s", exc)
         logger.error(
             "Run `python -m customer_segmentation.src.data.check_data` "
-            "to verify dataset placement."
+            "to verify dataset placement.",
         )
         sys.exit(1)
 
-    train_df, test_df = train_test_split(
+    train_df, val_df, test_df = train_val_test_split(
         cleaned,
         test_size=args.test_size,
+        val_size=args.val_size,
         random_state=args.random_state,
-        stratify=cleaned["campaign_response"],
+        stratify_col="campaign_response",
     )
 
     # Leakage-free feature transform: fit on train only
-    X_train_full, y_train, transformer = assemble_feature_table(
-        train_df, fit=True, label_mode="recent"
-    )
-    X_test_full, y_test, _ = assemble_feature_table(
-        test_df, transformer=transformer, fit=False, label_mode="recent"
-    )
+    X_train_full, y_train, transformer = assemble_feature_table(train_df, fit=True, label_mode="recent")
+    X_val_full, y_val, _ = assemble_feature_table(val_df, transformer=transformer, fit=False, label_mode="recent")
+    X_test_full, y_test, _ = assemble_feature_table(test_df, transformer=transformer, fit=False, label_mode="recent")
 
     X_train_beh, _ = split_behavior_and_response_features(X_train_full, transformer)
+    X_val_beh, _ = split_behavior_and_response_features(X_val_full, transformer)
     X_test_beh, _ = split_behavior_and_response_features(X_test_full, transformer)
 
     logger.info(
-        "Downstream split sizes: train=%d, test=%d | dims: full=%d, beh=%d",
-        len(train_df), len(test_df), X_train_full.shape[1], X_train_beh.shape[1],
+        "Downstream split sizes: train=%d, val=%d, test=%d | dims: full=%d, beh=%d",
+        len(train_df),
+        len(val_df),
+        len(test_df),
+        X_train_full.shape[1],
+        X_train_beh.shape[1],
     )
 
-    results = []
+    results: list[Dict[str, Any]] = []
 
     # 1) Base model
     logger.info("Training base logistic regression without cluster IDs")
-    base_clf = _train_classifier(X_train_full, y_train)
-    base_metrics = _evaluate_model(base_clf, X_test_full, y_test)
+    base_clf = _train_logreg(X_train_full, y_train)
+    prob_val = pd.Series(base_clf.predict_proba(X_val_full)[:, 1], index=X_val_full.index)
+    thr = prediction_eval.choose_threshold(y_val, prob_val, metric="f1")
+    prob_test = pd.Series(base_clf.predict_proba(X_test_full)[:, 1], index=X_test_full.index)
+    base_metrics = _evaluate_probs(y_test, prob_test, thr)
     base_metrics["model"] = "base"
     results.append(base_metrics)
 
-    # 2) KMeans cluster IDs (cluster on behavior features)
+    # 2) KMeans cluster IDs (cluster on behaviour features)
     logger.info("Training logistic regression with KMeans cluster IDs")
     kmeans_cfg = KMeansConfig(
         n_clusters=4,
@@ -214,18 +261,18 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     )
     kmeans_model = KMeansBaseline(kmeans_cfg)
     kmeans_model.fit(X_train_beh)
-    kmeans_labels_train = kmeans_model.predict(X_train_beh)
-    kmeans_labels_test = kmeans_model.predict(X_test_beh)
+    k_tr = kmeans_model.predict(X_train_beh)
+    k_va = kmeans_model.predict(X_val_beh)
+    k_te = kmeans_model.predict(X_test_beh)
 
-    kmeans_train, kmeans_test = _add_cluster_features(
-        X_train_full, X_test_full,
-        kmeans_labels_train, kmeans_labels_test,
-        prefix="kmeans",
-    )
-    kmeans_clf = _train_classifier(kmeans_train, y_train)
-    kmeans_metrics = _evaluate_model(kmeans_clf, kmeans_test, y_test)
-    kmeans_metrics["model"] = "base+kmeansid"
-    results.append(kmeans_metrics)
+    Xtr, Xva, Xte = _add_cluster_features(X_train_full, X_val_full, X_test_full, k_tr, k_va, k_te, prefix="kmeans")
+    clf = _train_logreg(Xtr, y_train)
+    prob_val = pd.Series(clf.predict_proba(Xva)[:, 1], index=Xva.index)
+    thr = prediction_eval.choose_threshold(y_val, prob_val, metric="f1")
+    prob_test = pd.Series(clf.predict_proba(Xte)[:, 1], index=Xte.index)
+    met = _evaluate_probs(y_test, prob_test, thr)
+    met["model"] = "base+kmeansid"
+    results.append(met)
 
     # 3) GMM cluster IDs (optional)
     if not args.skip_gmm:
@@ -233,18 +280,18 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         try:
             gmm_model = GMMBaseline(GMMConfig())
             gmm_model.fit(X_train_beh)
-            gmm_labels_train = gmm_model.predict(X_train_beh)
-            gmm_labels_test = gmm_model.predict(X_test_beh)
+            g_tr = gmm_model.predict(X_train_beh)
+            g_va = gmm_model.predict(X_val_beh)
+            g_te = gmm_model.predict(X_test_beh)
 
-            gmm_train, gmm_test = _add_cluster_features(
-                X_train_full, X_test_full,
-                gmm_labels_train, gmm_labels_test,
-                prefix="gmm",
-            )
-            gmm_clf = _train_classifier(gmm_train, y_train)
-            gmm_metrics = _evaluate_model(gmm_clf, gmm_test, y_test)
-            gmm_metrics["model"] = "base+gmmid"
-            results.append(gmm_metrics)
+            Xtr, Xva, Xte = _add_cluster_features(X_train_full, X_val_full, X_test_full, g_tr, g_va, g_te, prefix="gmm")
+            clf = _train_logreg(Xtr, y_train)
+            prob_val = pd.Series(clf.predict_proba(Xva)[:, 1], index=Xva.index)
+            thr = prediction_eval.choose_threshold(y_val, prob_val, metric="f1")
+            prob_test = pd.Series(clf.predict_proba(Xte)[:, 1], index=Xte.index)
+            met = _evaluate_probs(y_test, prob_test, thr)
+            met["model"] = "base+gmmid"
+            results.append(met)
         except Exception as exc:  # pragma: no cover
             logger.exception("GMM downstream pipeline failed: %s", exc)
 
@@ -252,26 +299,52 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     if not args.skip_rajc:
         logger.info("Training logistic regression with RAJC/RAMoE cluster IDs")
         try:
-            rajc_config = _load_rajc_config(logger)
+            rajc_config = _load_rajc_config(logger, override_model_type="ramoe")
             rajc_model = RAJCModel(rajc_config)
 
-            # RAMoE needs full_features to train experts; pass it for all modes.
+            # RAMoE uses full_features to train experts; pass it for all modes.
             rajc_model.fit(X_train_beh, y_train, full_features=X_train_full)
 
-            rajc_labels_train = pd.Series(rajc_model.assignments_, index=X_train_beh.index)
-            rajc_labels_test = pd.Series(rajc_model.predict_clusters(X_test_beh), index=X_test_beh.index)
+            r_tr = pd.Series(rajc_model.predict_clusters(X_train_beh), index=X_train_beh.index)
+            r_va = pd.Series(rajc_model.predict_clusters(X_val_beh), index=X_val_beh.index)
+            r_te = pd.Series(rajc_model.predict_clusters(X_test_beh), index=X_test_beh.index)
 
-            rajc_train, rajc_test = _add_cluster_features(
-                X_train_full, X_test_full,
-                rajc_labels_train, rajc_labels_test,
-                prefix="rajc",
-            )
-            rajc_clf = _train_classifier(rajc_train, y_train)
-            rajc_metrics = _evaluate_model(rajc_clf, rajc_test, y_test)
-            rajc_metrics["model"] = "base+rajcid"
-            results.append(rajc_metrics)
+            Xtr, Xva, Xte = _add_cluster_features(X_train_full, X_val_full, X_test_full, r_tr, r_va, r_te, prefix="rajc")
+            clf = _train_logreg(Xtr, y_train)
+            prob_val = pd.Series(clf.predict_proba(Xva)[:, 1], index=Xva.index)
+            thr = prediction_eval.choose_threshold(y_val, prob_val, metric="f1")
+            prob_test = pd.Series(clf.predict_proba(Xte)[:, 1], index=Xte.index)
+            met = _evaluate_probs(y_test, prob_test, thr)
+            met["model"] = "base+rajcid"
+            results.append(met)
         except Exception as exc:  # pragma: no cover
             logger.exception("RAJC/RAMoE downstream pipeline failed: %s", exc)
+
+    # 5) Direct RAJC/RAMoE probability predictions (optional)
+    if not args.skip_direct_rajc and not args.skip_rajc:
+        logger.info("Evaluating direct RAJC/RAMoE probability predictions")
+        try:
+            # Reuse fitted rajc_model if available above; otherwise fit here.
+            # If the above branch failed, this will refit.
+            if "rajc_model" not in locals():
+                rajc_config = _load_rajc_config(logger, override_model_type="ramoe")
+                rajc_model = RAJCModel(rajc_config)
+                rajc_model.fit(X_train_beh, y_train, full_features=X_train_full)
+
+            prob_val = pd.Series(
+                rajc_model.predict_response(X_val_beh, full_features=X_val_full),
+                index=X_val_beh.index,
+            )
+            thr = prediction_eval.choose_threshold(y_val, prob_val, metric="f1")
+            prob_test = pd.Series(
+                rajc_model.predict_response(X_test_beh, full_features=X_test_full),
+                index=X_test_beh.index,
+            )
+            met = _evaluate_probs(y_test, prob_test, thr)
+            met["model"] = "rajc_direct"
+            results.append(met)
+        except Exception as exc:  # pragma: no cover
+            logger.exception("Direct RAJC/RAMoE evaluation failed: %s", exc)
 
     results_df = pd.DataFrame(results)
     results_path = TABLE_DIR / "downstream_metrics.csv"

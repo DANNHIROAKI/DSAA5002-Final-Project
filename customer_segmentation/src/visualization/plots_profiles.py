@@ -1,80 +1,78 @@
-"""Cluster profiling visualizations aligned with the methodology.
+"""Cluster profiling and segment-level business visualizations.
 
-这些函数主要用在「簇画像 / Profiling」部分，帮助回答：
-“不同簇在收入、消费、年龄、渠道偏好和响应率上有什么差异？”.
+These plotting functions are mainly used in the *Profiling* section of the
+report, helping answer questions like:
+- How do clusters differ in spending, income, age and channel preference?
+- Do clusters exhibit clearly different response propensities?
 
-Upgrades for the new methodology:
-- Robust column-name resolution: works with both raw columns (Income/Monetary/Recency...)
-  and engineered columns (income/monetary/recency...).
-- Robust alignment between df index and cluster_labels index.
-- Add segmentation-oriented plots: cluster size + response rate in one figure.
-- Remove hard dependency on seaborn; use matplotlib only.
+Upgrades for the new method
+---------------------------
+- Robust column name resolution (raw vs engineered names).
+- Robust alignment between a DataFrame and its cluster labels.
+- Additional segment-level business plots:
+    * cluster lift bars (response_rate / global_rate)
+    * cluster-based budget allocation curve (lift vs budget fraction)
+
+All functions use matplotlib only.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple, Union
+from typing import List, Optional, Sequence, Union
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
 
-# -----------------------------
+# ---------------------------------------------------------------------------
 # Helpers
-# -----------------------------
+# ---------------------------------------------------------------------------
+
 
 def _align_labels(df: pd.DataFrame, cluster_labels: Union[pd.Series, np.ndarray, List[int]]) -> pd.Series:
     """Align cluster labels with df rows.
 
-    Rules:
+    Rules
+    -----
     - If cluster_labels is a Series with the same index as df: use as-is.
-    - If cluster_labels is a Series with different index but same length: reindex to df.index by position.
-    - If cluster_labels is array-like with same length: convert to Series using df.index.
+    - If cluster_labels is a Series with different index but same length: align by position.
+    - If cluster_labels is array-like with same length: convert to Series with df.index.
+
+    Raises
+    ------
+    ValueError
+        If alignment is not possible.
     """
     if isinstance(cluster_labels, pd.Series):
         if cluster_labels.index.equals(df.index):
             return cluster_labels
         if len(cluster_labels) == len(df):
             return pd.Series(cluster_labels.to_numpy(), index=df.index, name=cluster_labels.name or "cluster")
-        # Try align by index intersection
         aligned = cluster_labels.reindex(df.index)
         if aligned.isna().any():
-            raise ValueError(
-                "cluster_labels index does not align with df.index, and cannot safely reindex."
-            )
+            raise ValueError("cluster_labels index does not align with df.index, and cannot safely reindex.")
         return aligned.rename(cluster_labels.name or "cluster")
 
     arr = np.asarray(cluster_labels).reshape(-1)
     if len(arr) != len(df):
-        raise ValueError(
-            f"cluster_labels length must match df rows: {len(arr)} vs {len(df)}."
-        )
+        raise ValueError(f"cluster_labels length must match df rows: {len(arr)} vs {len(df)}.")
     return pd.Series(arr, index=df.index, name="cluster")
 
 
 def _resolve_col(df: pd.DataFrame, col: str, aliases: Sequence[str] = ()) -> str:
-    """Resolve a column name in a case-insensitive / alias-aware way.
-
-    If `col` does not exist, try:
-    - exact match (already checked)
-    - lowercase/uppercase/titlecase variants
-    - case-insensitive match against df.columns
-    - aliases (exact and case-insensitive)
-    """
+    """Resolve a column name in a case-insensitive / alias-aware way."""
     if col in df.columns:
         return col
 
     candidates = [col, col.lower(), col.upper(), col.title()]
     candidates.extend(list(aliases))
 
-    # Exact candidate match
     for c in candidates:
         if c in df.columns:
             return c
 
-    # Case-insensitive match
     lower_map = {str(c).lower(): str(c) for c in df.columns}
     for c in candidates:
         key = str(c).lower()
@@ -88,7 +86,6 @@ def _resolve_col(df: pd.DataFrame, col: str, aliases: Sequence[str] = ()) -> str
 
 
 def _resolve_cols(df: pd.DataFrame, cols: Sequence[str], aliases_map: Optional[dict[str, Sequence[str]]] = None) -> List[str]:
-    """Resolve multiple columns with an optional aliases_map."""
     out: List[str] = []
     for c in cols:
         aliases = ()
@@ -106,13 +103,32 @@ def _maybe_save(fig: plt.Figure, save_path: str | Path | None) -> None:
     fig.savefig(path, bbox_inches="tight", dpi=200)
 
 
-# -----------------------------
+def _align_pair(y_true: Union[pd.Series, np.ndarray, List[int]],
+                cluster_labels: Union[pd.Series, np.ndarray, List[int]]) -> tuple[pd.Series, pd.Series]:
+    """Align y_true and cluster_labels by index when possible; otherwise by position."""
+    y = pd.Series(y_true, name="y") if not isinstance(y_true, pd.Series) else y_true.rename("y")
+    z = pd.Series(cluster_labels, name="cluster") if not isinstance(cluster_labels, pd.Series) else cluster_labels.rename("cluster")
+
+    # If both have index, align on index via concat
+    if isinstance(y_true, pd.Series) and isinstance(cluster_labels, pd.Series):
+        df = pd.concat([y, z], axis=1).dropna()
+        return df["y"], df["cluster"]
+
+    # Fallback: align by position
+    if len(y) != len(z):
+        raise ValueError(f"y_true and cluster_labels length mismatch: {len(y)} vs {len(z)}")
+    df = pd.DataFrame({"y": y.to_numpy(), "cluster": z.to_numpy()}).dropna()
+    return df["y"], df["cluster"]
+
+
+# ---------------------------------------------------------------------------
 # Profiling plots
-# -----------------------------
+# ---------------------------------------------------------------------------
+
 
 def plot_income_vs_spent(
     df: pd.DataFrame,
-    cluster_labels: pd.Series,
+    cluster_labels: Union[pd.Series, np.ndarray, List[int]],
     hue_name: str = "Cluster",
     *,
     income_col: str = "Income",
@@ -121,31 +137,7 @@ def plot_income_vs_spent(
     alpha: float = 0.7,
     s: float = 20.0,
 ) -> plt.Figure:
-    """Scatter plot of income vs spending colored by cluster.
-
-    Notes
-    -----
-    This function supports both:
-    - Raw/cleaned data columns: Income / Monetary / Spent
-    - Engineered feature columns: income / monetary / spent
-
-    Parameters
-    ----------
-    df :
-        DataFrame containing income and monetary/spent columns.
-    cluster_labels :
-        Cluster labels aligned (or alignable) with df rows.
-    hue_name :
-        Legend title for clusters.
-    income_col :
-        Preferred column name for income (default "Income").
-    monetary_col :
-        Preferred column name for monetary/spent (default "monetary").
-    save_path :
-        Optional path to save the figure.
-    alpha, s :
-        Scatter transparency and marker size.
-    """
+    """Scatter plot of income vs spending coloured by cluster."""
     labels = _align_labels(df, cluster_labels)
 
     xcol = _resolve_col(df, income_col, aliases=("income",))
@@ -153,7 +145,6 @@ def plot_income_vs_spent(
 
     fig, ax = plt.subplots(figsize=(6, 4))
 
-    # Plot per cluster for a clean legend
     clusters = sorted(pd.unique(labels.dropna()))
     for cid in clusters:
         mask = labels == cid
@@ -171,19 +162,12 @@ def plot_income_vs_spent(
 
 def plot_rfm_boxplots(
     df: pd.DataFrame,
-    cluster_labels: pd.Series,
+    cluster_labels: Union[pd.Series, np.ndarray, List[int]],
     *,
     rfm_cols: Sequence[str] = ("recency", "frequency", "monetary"),
     save_path: str | Path | None = None,
 ) -> plt.Figure:
-    """Boxplots for RFM dimensions to contrast segments.
-
-    Compared with the original seaborn version, this produces a 1x3 subplot
-    layout (Recency/Frequency/Monetary), which is easier to read in the report.
-
-    Column-name robustness:
-    - accepts both "Recency"/"Frequency"/"Monetary" and "recency"/"frequency"/"monetary".
-    """
+    """Boxplots for R/F/M distributions by cluster."""
     labels = _align_labels(df, cluster_labels)
 
     aliases_map = {
@@ -215,22 +199,17 @@ def plot_rfm_boxplots(
 
 def plot_channel_mix(
     df: pd.DataFrame,
-    cluster_labels: pd.Series,
+    cluster_labels: Union[pd.Series, np.ndarray, List[int]],
     channel_cols: Optional[List[str]] = None,
     *,
     save_path: str | Path | None = None,
 ) -> plt.Figure:
-    """Stacked bar of average channel usage per cluster (web/catalog/store).
-
-    We plot *proportions* within each cluster (not absolute counts) so the plot
-    reflects preference rather than size.
-    """
+    """Stacked bar plot of average channel usage proportions per cluster."""
     labels = _align_labels(df, cluster_labels)
 
     if channel_cols is None:
         channel_cols = ["NumWebPurchases", "NumCatalogPurchases", "NumStorePurchases"]
 
-    # allow engineered lower-case names too
     aliases_map = {
         "NumWebPurchases": ("numwebpurchases",),
         "NumCatalogPurchases": ("numcatalogpurchases",),
@@ -269,17 +248,7 @@ def plot_response_rates(
     annotate: bool = True,
     save_path: str | Path | None = None,
 ) -> plt.Figure:
-    """Bar chart of response rates per cluster.
-
-    Parameters
-    ----------
-    response_rates:
-        pd.Series indexed by cluster id.
-    global_rate:
-        Optional global response rate (draw a dashed horizontal line).
-    annotate:
-        Whether to annotate each bar with its value.
-    """
+    """Bar chart of response rates per cluster."""
     rr = response_rates.dropna().sort_index()
 
     fig, ax = plt.subplots(figsize=(6, 4))
@@ -291,22 +260,13 @@ def plot_response_rates(
 
     if global_rate is not None and np.isfinite(global_rate):
         ax.axhline(float(global_rate), linestyle="--", linewidth=1)
-        ax.text(
-            0.98,
-            float(global_rate),
-            f" global={global_rate:.3f}",
-            ha="right",
-            va="bottom",
-            transform=ax.get_yaxis_transform(),
-            fontsize=9,
-        )
 
     if annotate:
         for b, v in zip(bars, rr.values):
             ax.text(
                 b.get_x() + b.get_width() / 2,
-                v,
-                f"{v:.3f}",
+                float(v),
+                f"{float(v):.3f}",
                 ha="center",
                 va="bottom",
                 fontsize=8,
@@ -324,15 +284,10 @@ def plot_cluster_size_and_response(
     *,
     save_path: str | Path | None = None,
 ) -> plt.Figure:
-    """Plot cluster size (bar) and response rate (line) together.
-
-    This is particularly useful for the new methodology because:
-    - High response rate in a tiny cluster may be less useful than moderate rate in a large cluster.
-    """
+    """Plot cluster size (bar) and response rate (line) together."""
     sizes = cluster_sizes.dropna().sort_index()
     rates = response_rates.dropna().sort_index()
 
-    # Align index union
     idx = sorted(set(sizes.index).union(set(rates.index)))
     sizes = sizes.reindex(idx).fillna(0).astype(float)
     rates = rates.reindex(idx).astype(float)
@@ -358,7 +313,7 @@ def plot_cluster_size_and_response(
 
 def plot_age_income_kde(
     df: pd.DataFrame,
-    cluster_labels: pd.Series,
+    cluster_labels: Union[pd.Series, np.ndarray, List[int]],
     age_col: str = "Age",
     income_col: str = "Income",
     *,
@@ -367,22 +322,7 @@ def plot_age_income_kde(
     mincnt: int = 1,
     save_path: str | Path | None = None,
 ) -> plt.Figure:
-    """Density heatmaps for age vs income per cluster.
-
-    Notes
-    -----
-    The original implementation used seaborn.kdeplot. To avoid depending on seaborn/scipy,
-    we use matplotlib.hexbin as a robust density-like visualization.
-
-    Parameters
-    ----------
-    age_col / income_col:
-        Prefer raw names ("Age", "Income"), but engineered ("age", "income") also works.
-    n_cols:
-        Number of subplot columns; rows are determined automatically.
-    gridsize:
-        Hexbin resolution.
-    """
+    """Density-like plots for age vs income per cluster using hexbin."""
     labels = _align_labels(df, cluster_labels)
 
     xcol = _resolve_col(df, age_col, aliases=("age",))
@@ -390,7 +330,6 @@ def plot_age_income_kde(
 
     clusters = sorted(pd.unique(labels.dropna()))
     n_clusters = len(clusters)
-
     if n_clusters == 0:
         raise ValueError("No clusters found in cluster_labels.")
 
@@ -409,18 +348,16 @@ def plot_age_income_kde(
         hb = ax.hexbin(
             subset[xcol].to_numpy(),
             subset[ycol].to_numpy(),
-            gridsize=gridsize,
-            mincnt=mincnt,
+            gridsize=int(gridsize),
+            mincnt=int(mincnt),
         )
         ax.set_title(f"Cluster {cid}")
         ax.set_xlabel(xcol)
         ax.set_ylabel(ycol)
 
-        # Add a small colorbar for each subplot (readable for report figures)
         cb = fig.colorbar(hb, ax=ax, fraction=0.046, pad=0.04)
         cb.ax.tick_params(labelsize=8)
 
-    # Hide any unused axes
     for ax in axes[n_clusters:]:
         ax.axis("off")
 
@@ -429,3 +366,163 @@ def plot_age_income_kde(
 
     _maybe_save(fig, save_path)
     return fig
+
+
+# ---------------------------------------------------------------------------
+# New segment-level business plots
+# ---------------------------------------------------------------------------
+
+
+def plot_cluster_lift_bars(
+    cluster_labels: Union[pd.Series, np.ndarray, List[int]],
+    y_true: Union[pd.Series, np.ndarray, List[int]],
+    title: str = "Cluster lift vs global",
+    *,
+    annotate: bool = True,
+    save_path: str | Path | None = None,
+) -> plt.Figure:
+    """Bar chart of cluster lift (response_rate / global_rate).
+
+    This is a compact way to show whether the segmentation is *actionable*:
+    clusters should have clearly different lift values.
+    """
+    y, z = _align_pair(y_true, cluster_labels)
+
+    y_bin = (pd.to_numeric(y, errors="coerce") > 0).astype(int)
+    z = z.astype(int)
+
+    df = pd.DataFrame({"y": y_bin, "cluster": z}).dropna()
+    if df.empty:
+        raise ValueError("Empty inputs after alignment / NaN dropping.")
+
+    global_rate = float(df["y"].mean())
+    rates = df.groupby("cluster")["y"].mean().sort_index()
+
+    if global_rate <= 0:
+        lifts = rates * np.nan
+    else:
+        lifts = rates / global_rate
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    bars = ax.bar([str(i) for i in lifts.index], lifts.values)
+
+    ax.set_xlabel("Cluster")
+    ax.set_ylabel("Lift")
+    ax.set_title(title)
+    ax.axhline(1.0, linestyle="--", linewidth=1, label="Global (lift=1)")
+
+    if annotate:
+        for b, v in zip(bars, lifts.values):
+            if np.isfinite(v):
+                ax.text(
+                    b.get_x() + b.get_width() / 2,
+                    float(v),
+                    f"{float(v):.2f}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=8,
+                )
+
+    ax.legend()
+    fig.tight_layout()
+    _maybe_save(fig, save_path)
+    return fig
+
+
+def plot_cluster_budget_allocation_curve(
+    cluster_labels: Union[pd.Series, np.ndarray, List[int]],
+    y_true: Union[pd.Series, np.ndarray, List[int]],
+    title: str = "Cluster-based budget allocation (expected lift)",
+    *,
+    fractions: Sequence[float] = (0.05, 0.1, 0.2, 0.3, 0.5),
+    save_path: str | Path | None = None,
+) -> plt.Figure:
+    """Expected lift curve of a *cluster-level* targeting policy.
+
+    Policy
+    ------
+    1) Estimate response rate for each cluster.
+    2) Sort clusters by rate (descending).
+    3) Spend budget by targeting customers from the best clusters first.
+
+    When the last selected cluster would exceed the budget, we assume we
+    sample uniformly within that cluster (i.e., partial inclusion).
+
+    This curve complements the *ranking-based* lift curve:
+    - Ranking lift reflects how well the model orders *individuals*.
+    - Cluster allocation lift reflects how useful the *segmentation* is for
+      coarse-grained campaign planning.
+    """
+    y, z = _align_pair(y_true, cluster_labels)
+
+    y_bin = (pd.to_numeric(y, errors="coerce") > 0).astype(int)
+    z = z.astype(int)
+
+    df = pd.DataFrame({"y": y_bin, "cluster": z}).dropna()
+    if df.empty:
+        raise ValueError("Empty inputs after alignment / NaN dropping.")
+
+    global_rate = float(df["y"].mean())
+    n = int(len(df))
+
+    # cluster stats
+    stats = (
+        df.groupby("cluster")["y"]
+        .agg([("size", "count"), ("rate", "mean")])
+        .sort_values("rate", ascending=False)
+    )
+
+    fracs: list[float] = []
+    lifts: list[float] = []
+
+    for f in fractions:
+        f = float(f)
+        if not (0.0 < f <= 1.0):
+            continue
+        budget = int(np.ceil(n * f))
+        budget = max(1, min(budget, n))
+
+        remaining = budget
+        expected_pos = 0.0
+
+        for _, row in stats.iterrows():
+            if remaining <= 0:
+                break
+            size_c = int(row["size"])
+            rate_c = float(row["rate"])
+
+            take = min(remaining, size_c)
+            expected_pos += float(take) * rate_c
+            remaining -= take
+
+        expected_precision = expected_pos / float(budget)
+        lift = float("nan") if global_rate <= 0 else expected_precision / global_rate
+        fracs.append(f)
+        lifts.append(lift)
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.plot(fracs, lifts, marker="o", label="Cluster allocation")
+    ax.axhline(1.0, linestyle="--", linewidth=1, label="Random (lift=1)")
+
+    ax.set_xlabel("Budget fraction (top-q)")
+    ax.set_ylabel("Expected lift")
+    ax.set_title(title)
+    ax.legend()
+    fig.tight_layout()
+
+    _maybe_save(fig, save_path)
+    return fig
+
+
+__all__ = [
+    # profiling
+    "plot_income_vs_spent",
+    "plot_rfm_boxplots",
+    "plot_channel_mix",
+    "plot_response_rates",
+    "plot_cluster_size_and_response",
+    "plot_age_income_kde",
+    # business/segmentation
+    "plot_cluster_lift_bars",
+    "plot_cluster_budget_allocation_curve",
+]

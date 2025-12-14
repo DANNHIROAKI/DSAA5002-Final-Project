@@ -1,34 +1,23 @@
-"""Utility helpers for logging, seeding, and ranking/business metrics.
+"""Project-wide utilities (logging, seeds, ranking metrics).
 
-This package exposes a small, cohesive API that is used across the project.
-
-Recommended imports
--------------------
-from customer_segmentation.src.utils import (
-    configure_logging,
-    set_global_seed,
-    compute_lift,
-    lift_curve,
-    ranking_summary,
-)
-
-The upgraded methodology emphasizes:
-- leakage-free evaluation splits (handled elsewhere),
-- reproducibility (seed_utils),
-- business-relevant ranking metrics (metrics_utils).
+This directory is deliberately lightweight. It supports the upgraded
+RAMoE / HyRAMoE methodology by providing budget-oriented ranking metrics
+(e.g., lift@top-q) used across experiments and plots.
 """
 
 from __future__ import annotations
 
 from .logging_utils import DEFAULT_LOG_FORMAT, configure_logging
 from .metrics_utils import (
+    assignment_entropy,
+    assignment_maxprob,
     compute_lift,
+    expected_score_sum_in_top_frac,
     lift_curve,
-    ranking_summary,
+    positives_in_top_frac,
     precision_at_frac,
     recall_at_frac,
-    positives_in_top_frac,
-    expected_score_sum_in_top_frac,
+    ranking_summary,
     top_k_from_frac,
 )
 from .seed_utils import reproducible_numpy_rng, set_global_seed, temp_seed
@@ -47,4 +36,6 @@ __all__ = [
     "positives_in_top_frac",
     "expected_score_sum_in_top_frac",
     "top_k_from_frac",
+    "assignment_entropy",
+    "assignment_maxprob",
 ]

@@ -1,18 +1,19 @@
 """Segmentation-level metrics and utilities.
 
-This module provides helpers for analysing how well a clustering aligns
-with promotion-response behaviour, e.g. cluster-wise response rates and
-their dispersion.
+This module measures whether a clustering is *actionable* for marketing:
+- clusters should differ in response rate (high dispersion)
+- clusters should be reasonably balanced (avoid many tiny clusters)
 
-Upgrades for the new methodology:
-- Add response_rate_range / response_rate_std for richer response stratification reporting.
-- Add campaign_allocation_lift for budgeted targeting analysis at the cluster level.
-- Provide cluster_response_summary alias (same as segmentation_table).
+Upgraded for RAMoE/HyRAMoE
+--------------------------
+- robust index alignment and NaN handling
+- adds cluster_lift_table and weighted_response_rate_variance
+- adds campaign_allocation_lift for budget-style analysis
 """
 
 from __future__ import annotations
 
-from typing import Sequence, Union, Optional, Any
+from typing import Any, Sequence, Union, Optional
 
 import numpy as np
 import pandas as pd
@@ -29,48 +30,40 @@ def _to_series(values: ArrayLike, name: str) -> pd.Series:
     return pd.Series(values, name=name)
 
 
-def _coerce_binary_like(y: pd.Series) -> pd.Series:
-    """Coerce a response label series into numeric values (0/1-like).
-
-    We do not force exact {0,1} here to keep compatibility with:
-    - boolean labels
-    - float labels already in [0,1]
-    """
-    out = pd.to_numeric(y, errors="coerce")
+def _coerce_numeric(series: pd.Series, *, name: str) -> pd.Series:
+    out = pd.to_numeric(series, errors="coerce")
+    out.name = name
     return out
+
+
+def _aligned_cluster_and_response(
+    cluster_labels: ArrayLike,
+    responses: ArrayLike,
+) -> pd.DataFrame:
+    """Align cluster labels and responses by index and drop NaNs.
+
+    This is important when callers pass pandas Series with non-trivial indices.
+    """
+    c = _to_series(cluster_labels, "cluster")
+    y = _to_series(responses, "response")
+
+    # concat aligns on index automatically
+    df = pd.concat([c, y], axis=1)
+
+    # response should be numeric; clusters may be numeric or categorical
+    df["response"] = _coerce_numeric(df["response"], name="response")
+
+    # drop missing
+    df = df.dropna(subset=["cluster", "response"])
+    return df
 
 
 def cluster_response_rates(
     cluster_labels: ArrayLike,
     responses: ArrayLike,
 ) -> pd.Series:
-    """Compute per-cluster promotion-response rates.
-
-    Parameters
-    ----------
-    cluster_labels
-        Cluster assignment for each sample (ints 0..K-1 or similar).
-    responses
-        Binary response label for each sample (0 / 1).
-
-    Returns
-    -------
-    pd.Series
-        Index is cluster id, values are mean response rate in that cluster.
-    """
-    clusters = _to_series(cluster_labels, name="cluster")
-    y = _to_series(responses, name="response")
-
-    if len(clusters) != len(y):
-        raise ValueError(
-            f"cluster_labels and responses must have the same length, "
-            f"got {len(clusters)} and {len(y)}."
-        )
-
-    df = pd.DataFrame({"cluster": clusters, "response": y})
-    df["response"] = _coerce_binary_like(df["response"])
-    df = df.dropna(subset=["cluster", "response"])
-
+    """Compute mean response rate per cluster."""
+    df = _aligned_cluster_and_response(cluster_labels, responses)
     if df.empty:
         return pd.Series(dtype=float, name="response_rate")
 
@@ -79,42 +72,12 @@ def cluster_response_rates(
     return rates
 
 
-def response_rate_variance(rates: ArrayLike) -> float:
-    """Variance of cluster-wise response rates.
-
-    A larger value indicates stronger dispersion of response behaviour
-    across clusters (i.e., segments are more differentiated in terms of
-    campaign response).
-    """
-    r = np.asarray(_to_series(rates, name="response_rate"), dtype=float)
-    if r.size == 0:
-        return float("nan")
-    return float(np.nanvar(r))
-
-
-def response_rate_std(rates: ArrayLike, ddof: int = 0) -> float:
-    """Standard deviation of cluster-wise response rates."""
-    r = np.asarray(_to_series(rates, name="response_rate"), dtype=float)
-    if r.size == 0:
-        return float("nan")
-    return float(np.nanstd(r, ddof=ddof))
-
-
-def response_rate_range(rates: ArrayLike) -> float:
-    """Range (max - min) of cluster-wise response rates."""
-    r = np.asarray(_to_series(rates, name="response_rate"), dtype=float)
-    if r.size == 0:
-        return float("nan")
-    return float(np.nanmax(r) - np.nanmin(r))
-
-
 def cluster_size_summary(cluster_labels: ArrayLike) -> pd.Series:
     """Return the size (count) of each cluster as a Series."""
-    clusters = _to_series(cluster_labels, name="cluster")
-    clusters = clusters.dropna()
-    if clusters.empty:
+    c = _to_series(cluster_labels, "cluster").dropna()
+    if c.empty:
         return pd.Series(dtype=int, name="cluster_size")
-    counts = clusters.value_counts().sort_index()
+    counts = c.value_counts().sort_index()
     counts.name = "cluster_size"
     return counts
 
@@ -123,34 +86,23 @@ def segmentation_table(
     cluster_labels: ArrayLike,
     responses: ArrayLike,
 ) -> pd.DataFrame:
-    """Convenience function: full segmentation summary table.
+    """Full segmentation summary table.
 
     Columns:
-        - size
-        - positives
-        - negatives
-        - response_rate
+      - size
+      - positives
+      - negatives
+      - response_rate
     """
-    clusters = _to_series(cluster_labels, name="cluster")
-    y = _to_series(responses, name="response")
-
-    if len(clusters) != len(y):
-        raise ValueError(
-            f"cluster_labels and responses must have the same length, "
-            f"got {len(clusters)} and {len(y)}."
-        )
-
-    df = pd.DataFrame({"cluster": clusters, "response": y})
-    df["response"] = _coerce_binary_like(df["response"])
-    df = df.dropna(subset=["cluster", "response"])
-
+    df = _aligned_cluster_and_response(cluster_labels, responses)
     if df.empty:
         return pd.DataFrame(
             columns=["size", "positives", "negatives", "response_rate"]
-        ).astype({"size": int, "positives": float, "negatives": float, "response_rate": float})
+        ).astype(
+            {"size": int, "positives": float, "negatives": float, "response_rate": float}
+        )
 
     grouped = df.groupby("cluster")
-
     size = grouped.size()
     positives = grouped["response"].sum()
     negatives = size - positives
@@ -172,8 +124,87 @@ def cluster_response_summary(
     cluster_labels: ArrayLike,
     responses: ArrayLike,
 ) -> pd.DataFrame:
-    """Alias kept for readability in reports; identical to segmentation_table()."""
+    """Alias for :func:`segmentation_table` (kept for readability)."""
     return segmentation_table(cluster_labels, responses)
+
+
+def response_rate_variance(rates: ArrayLike) -> float:
+    """Unweighted variance of cluster-wise response rates."""
+    r = _coerce_numeric(_to_series(rates, "response_rate"), name="response_rate").to_numpy(dtype=float)
+    if r.size == 0:
+        return float("nan")
+    return float(np.nanvar(r))
+
+
+def response_rate_std(rates: ArrayLike, ddof: int = 0) -> float:
+    """Unweighted std of cluster-wise response rates."""
+    r = _coerce_numeric(_to_series(rates, "response_rate"), name="response_rate").to_numpy(dtype=float)
+    if r.size == 0:
+        return float("nan")
+    return float(np.nanstd(r, ddof=int(ddof)))
+
+
+def response_rate_range(rates: ArrayLike) -> float:
+    """Range (max-min) of cluster-wise response rates."""
+    r = _coerce_numeric(_to_series(rates, "response_rate"), name="response_rate").to_numpy(dtype=float)
+    if r.size == 0:
+        return float("nan")
+    return float(np.nanmax(r) - np.nanmin(r))
+
+
+def weighted_response_rate_variance(
+    cluster_labels: ArrayLike,
+    responses: ArrayLike,
+) -> float:
+    """Size-weighted variance of cluster response rates.
+
+    Motivation
+    ----------
+    An unweighted variance can be dominated by tiny clusters. Weighting by
+    cluster size makes the dispersion metric more stable and closer to an
+    ANOVA-style between-cluster variance.
+    """
+    df = _aligned_cluster_and_response(cluster_labels, responses)
+    if df.empty:
+        return float("nan")
+
+    summary = segmentation_table(df["cluster"], df["response"])
+    sizes = summary["size"].to_numpy(dtype=float)
+    rates = summary["response_rate"].to_numpy(dtype=float)
+
+    if sizes.sum() <= 0:
+        return float("nan")
+
+    weights = sizes / sizes.sum()
+    mean_rate = float(np.sum(weights * rates))
+    var = float(np.sum(weights * (rates - mean_rate) ** 2))
+    return var
+
+
+def cluster_lift_table(
+    cluster_labels: ArrayLike,
+    responses: ArrayLike,
+) -> pd.DataFrame:
+    """Per-cluster lift table relative to the global response rate.
+
+    Returns a DataFrame with:
+      - size, share
+      - response_rate
+      - lift_vs_global = response_rate / global_rate
+    """
+    df = _aligned_cluster_and_response(cluster_labels, responses)
+    if df.empty:
+        return pd.DataFrame(columns=["size", "share", "response_rate", "lift_vs_global"])
+
+    summary = segmentation_table(df["cluster"], df["response"]).copy()
+    n = float(summary["size"].sum())
+    global_rate = float(df["response"].mean())
+
+    summary["share"] = summary["size"].astype(float) / (n if n > 0 else np.nan)
+    summary["lift_vs_global"] = summary["response_rate"].astype(float) / (global_rate if global_rate > 0 else np.nan)
+
+    # Order by response_rate descending for readability
+    return summary.sort_values("response_rate", ascending=False)
 
 
 def campaign_allocation_lift(
@@ -183,50 +214,24 @@ def campaign_allocation_lift(
     *,
     return_details: bool = False,
 ) -> float | dict[str, Any]:
-    """Estimate cluster-level lift under a budgeted targeting policy.
+    """Estimate lift under a *cluster-level* budget allocation policy.
 
-    Policy:
-    - Compute empirical response rate for each cluster.
+    Policy
+    ------
+    - Estimate cluster response rates from data.
     - Sort clusters by response rate descending.
-    - Allocate a marketing budget to cover top `budget_frac` customers by
-      taking customers from the best clusters first (allow partial last cluster).
+    - Allocate budget to customers from best clusters first until budget is used.
+      (partial allocation is allowed for the last cluster).
 
-    The lift is defined as:
-        expected_responders_targeted / expected_responders_random
+    Lift definition
+    ---------------
+    expected_responders_targeted / expected_responders_random
 
-    where "random" means uniformly selecting the same number of customers
-    from the whole population.
-
-    Parameters
-    ----------
-    cluster_labels:
-        Cluster id per customer.
-    responses:
-        Binary labels (0/1).
-    budget_frac:
-        Fraction of customers we can target (e.g., 0.2 for top-20%).
-    return_details:
-        If True, return a dict with intermediate values.
-
-    Returns
-    -------
-    float or dict
-        Lift value, or a dict with lift and intermediates.
     """
     if not (0.0 < float(budget_frac) <= 1.0):
-        raise ValueError(f"budget_frac must be in (0, 1], got {budget_frac}")
+        raise ValueError(f"budget_frac must be in (0,1], got {budget_frac}")
 
-    clusters = _to_series(cluster_labels, name="cluster")
-    y = _to_series(responses, name="response")
-    if len(clusters) != len(y):
-        raise ValueError(
-            f"cluster_labels and responses must have the same length, "
-            f"got {len(clusters)} and {len(y)}."
-        )
-
-    df = pd.DataFrame({"cluster": clusters, "response": y})
-    df["response"] = _coerce_binary_like(df["response"])
-    df = df.dropna(subset=["cluster", "response"])
+    df = _aligned_cluster_and_response(cluster_labels, responses)
     if df.empty:
         out = float("nan")
         return {"lift": out} if return_details else out
@@ -237,14 +242,13 @@ def campaign_allocation_lift(
         out = float("nan")
         return {"lift": out} if return_details else out
 
-    summary = segmentation_table(df["cluster"], df["response"])
-    summary_sorted = summary.sort_values("response_rate", ascending=False)
+    summary = segmentation_table(df["cluster"], df["response"]).sort_values("response_rate", ascending=False)
 
     remaining = n_select
     expected_targeted = 0.0
     selected_from_clusters: dict[Any, int] = {}
 
-    for cid, row in summary_sorted.iterrows():
+    for cid, row in summary.iterrows():
         if remaining <= 0:
             break
         size_k = int(row["size"])
@@ -257,7 +261,6 @@ def campaign_allocation_lift(
 
     global_rate = float(df["response"].mean())
     expected_random = global_rate * float(n_select)
-
     lift = float("nan") if expected_random <= 0 else float(expected_targeted / expected_random)
 
     if return_details:
@@ -272,3 +275,17 @@ def campaign_allocation_lift(
             "selected_from_clusters": selected_from_clusters,
         }
     return lift
+
+
+__all__ = [
+    "cluster_response_rates",
+    "cluster_size_summary",
+    "segmentation_table",
+    "cluster_response_summary",
+    "response_rate_variance",
+    "response_rate_std",
+    "response_rate_range",
+    "weighted_response_rate_variance",
+    "cluster_lift_table",
+    "campaign_allocation_lift",
+]

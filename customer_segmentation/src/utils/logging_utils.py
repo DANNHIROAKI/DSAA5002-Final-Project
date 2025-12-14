@@ -1,15 +1,16 @@
 """Logging configuration utilities for experiments and scripts.
 
-Design goals (aligned with the new methodology):
-- Stable, non-duplicated logs for both CLI and notebooks.
+Design goals
+------------
+- Stable logs for both CLI and notebooks (avoid duplicate handlers).
 - Optional file logging for reproducibility.
-- Minimal surprises: no implicit file creation unless log_file is provided.
+- Minimal surprises: no implicit file creation unless ``log_file`` is provided.
 
-Usage
------
->>> from customer_segmentation.src.utils.logging_utils import configure_logging
->>> logger = configure_logging()
->>> logger.info("hello")
+Used by
+-------
+- ``customer_segmentation/run_all_experiments.py``
+- ``customer_segmentation/src/experiments/*.py``
+
 """
 
 from __future__ import annotations
@@ -30,31 +31,26 @@ def configure_logging(
     force: bool = True,
     capture_warnings: bool = True,
 ) -> logging.Logger:
-    """Configure and return a logger used across experiment entrypoints.
-
-    This helper clears existing handlers (when force=True) to avoid duplicated logs
-    when running notebooks or re-importing modules, wires a console handler, and
-    optionally writes logs to `log_file`.
+    """Configure and return a logger.
 
     Parameters
     ----------
-    level :
-        Desired log level (INFO by default).
-    log_file :
-        Optional path to a log file. Parent directories are created when needed.
-        If given as a directory path, the log file name defaults to "<logger_name or root>.log".
-    logger_name :
-        Name of the logger to configure. None configures the root logger.
-    force :
-        If True (default), remove any existing handlers from the target logger
-        before adding new ones (prevents duplicate outputs).
-    capture_warnings :
+    level:
+        Log level (default: INFO).
+    log_file:
+        Optional path to a log file. If a directory is provided, the log file
+        name defaults to ``<logger_name or root>.log``.
+    logger_name:
+        Name of the logger to configure. ``None`` configures the root logger.
+    force:
+        If True (default), remove existing handlers to prevent duplicate logs.
+    capture_warnings:
         If True (default), route Python warnings through logging.
 
     Returns
     -------
     logging.Logger
-        The configured logger instance.
+        Configured logger.
     """
     logger = logging.getLogger(logger_name)
     logger.setLevel(level)

@@ -1,45 +1,37 @@
-"""Experiment entrypoints for baselines, RAJC, and ablations.
+"""Experiment entrypoints for the project.
 
-This package exposes convenience wrappers around the main experimental
-scripts so they can be invoked programmatically, e.g., from notebooks.
-
-Typical usage
--------------
->>> from customer_segmentation.src.experiments import (
-...     run_baselines,
-...     run_rajc,
-...     run_downstream,
-...     run_ablation,
-... )
->>> run_baselines()   # equivalent to: python -m ...run_baselines
-
-By default, :mod:`run_rajc` uses the RAJC-v2 configuration
-(model_type="constant_prob") defined in ``configs/rajc.yaml``.
+Each module contains a CLI-friendly ``main`` function.
+This package re-exports those entrypoints so they can be called
+programmatically, e.g. from ``customer_segmentation/run_all_experiments.py``.
 """
 
 from __future__ import annotations
 
-from typing import Sequence, Optional
+from typing import Optional, Sequence
 
-from .run_baselines import main as run_baselines
-from .run_rajc import main as run_rajc
-from .run_downstream import main as run_downstream
 from .run_ablation import main as run_ablation
+from .run_baselines import main as run_baselines
+from .run_downstream import main as run_downstream
+from .run_rajc import main as run_rajc
 
 __all__ = [
     "run_baselines",
     "run_rajc",
     "run_downstream",
     "run_ablation",
+    "run_all",
 ]
 
 
 def run_all(argv: Optional[Sequence[str]] = None) -> None:
-    """Run baselines, RAJC, and downstream experiments in sequence.
+    """Run the main experiment suite with default parameters.
 
-    This is purely a convenience function for quick end-to-end experiments.
+    Parameters
+    ----------
+    argv:
+        Currently unused. The wrapper is kept for backward compatibility.
     """
-    # We ignore argv here and rely on each sub-main's default CLI parameters.
+    _ = argv
     run_baselines()
     run_rajc()
     run_downstream()
